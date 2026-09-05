@@ -22,6 +22,7 @@ _DASHBOARD_CLARIFY_VERSION = 1
 _DASHBOARD_CLARIFY_MAX_CHOICES = 9
 _DASHBOARD_CLARIFY_MAX_QUESTION_CHARS = 4_000
 _DASHBOARD_CLARIFY_MAX_CHOICE_CHARS = 1_000
+_DASHBOARD_CLARIFY_MAX_QUESTION_ID_CHARS = 128
 _DASHBOARD_CLARIFY_TERMINAL_STATES = frozenset({"completed", "expired"})
 _DASHBOARD_CLARIFY_RETRY_MESSAGE = (
     "The manager could not resume yet. Your handoff is still paused; choose an answer to retry."
@@ -136,10 +137,10 @@ def _dashboard_clarify_write(session: dict, marker: dict) -> bool:
 
 def _dashboard_clarify_wire_payload(request_id: str, payload: dict) -> dict | None:
     """Return the bounded single-question payload the mobile card is allowed to render."""
-    if payload.get("questions"):
+    normalized = _dashboard_clarify_single_question(payload)
+    if normalized is None:
         return None
-    question = payload.get("question")
-    choices = payload.get("choices")
+    question, choices, question_id = normalized
     if not _dashboard_clarify_valid_text(question, _DASHBOARD_CLARIFY_MAX_QUESTION_CHARS):
         return None
     if not isinstance(choices, list) or not 1 <= len(choices) <= _DASHBOARD_CLARIFY_MAX_CHOICES:
@@ -147,7 +148,31 @@ def _dashboard_clarify_wire_payload(request_id: str, payload: dict) -> dict | No
     if not all(_dashboard_clarify_valid_text(choice, _DASHBOARD_CLARIFY_MAX_CHOICE_CHARS)
                for choice in choices):
         return None
-    return {"request_id": request_id, "question": question, "choices": list(choices)}
+    wire = {"request_id": request_id, "question": question, "choices": list(choices)}
+    if question_id:
+        wire["question_id"] = question_id
+    return wire
+
+
+def _dashboard_clarify_single_question(payload: dict) -> tuple[object, object, str] | None:
+    """Flatten the canonical one-entry batch while excluding unsupported handoff forms."""
+    questions = payload.get("questions")
+    if questions is None:
+        question_id = payload.get("question_id") or ""
+        if question_id and not _dashboard_clarify_valid_text(
+            question_id, _DASHBOARD_CLARIFY_MAX_QUESTION_ID_CHARS,
+        ):
+            return None
+        return payload.get("question"), payload.get("choices"), question_id
+    if not isinstance(questions, list) or len(questions) != 1:
+        return None
+    entry = questions[0]
+    if not isinstance(entry, dict) or entry.get("multi_select"):
+        return None
+    question_id = entry.get("qid")
+    if not _dashboard_clarify_valid_text(question_id, _DASHBOARD_CLARIFY_MAX_QUESTION_ID_CHARS):
+        return None
+    return entry.get("question"), entry.get("choices"), question_id
 
 
 def _dashboard_clarify_valid_text(value, limit: int) -> bool:
@@ -498,7 +523,7 @@ def dashboard_clarify_respond_choice(sid: str, request_id: str, choice_index: in
             return {"status": "invalid"}
         if request_id in _pending:
             return _dashboard_clarify_respond_live(
-                sid, session, request_id, choice_index, choice, marker["choices"],
+                sid, session, request_id, choice_index, choice, marker,
             )
 
         # No live blocking tool call means this is the post-restart path.  The durable marker is
@@ -524,22 +549,45 @@ def _dashboard_clarify_choice(marker: dict, choice_index: int) -> str | None:
 
 def _dashboard_clarify_respond_live(
     sid: str, session: dict, request_id: str, choice_index: int,
-    choice: str, stored_choices: list,
+    choice: str, marker: dict,
 ) -> dict:
-    owner_sid, event_ready = _pending[request_id]
-    event, prompt_payload = _pending_prompt_payloads.get(request_id, ("", {}))
-    if owner_sid != sid or event != "clarify.request":
+    slot = _dashboard_clarify_live_answer_slot(
+        sid, request_id, marker,
+    )
+    if slot is None:
         return {"status": "conflict"}
-    if prompt_payload.get("choices") != stored_choices:
-        return {"status": "conflict"}
+    event_ready, question_id, batch = slot
     if not _dashboard_clarify_set_status(
         session, request_id, "answered", answer=choice,
         choice_index=choice_index, answered_at=time.time(),
     ):
         return {"status": "unavailable"}
-    _answers[request_id] = choice
+    if question_id:
+        assert batch is not None  # validated before the durable status transition
+        batch["answers"][question_id] = choice
+    else:
+        _answers[request_id] = choice
     event_ready.set()
     return {"status": "ok", "mode": "live"}
+
+
+def _dashboard_clarify_live_answer_slot(
+    sid: str, request_id: str, marker: dict,
+) -> tuple[threading.Event, str, dict | None] | None:
+    """Validate the process-local clarify slot before its durable status changes."""
+    owner_sid, event_ready = _pending[request_id]
+    event, prompt_payload = _pending_prompt_payloads.get(request_id, ("", {}))
+    if owner_sid != sid or event != "clarify.request":
+        return None
+    wire = _dashboard_clarify_wire_payload(request_id, prompt_payload)
+    stored_wire = _dashboard_clarify_wire_payload(request_id, marker)
+    if wire is None or wire != stored_wire:
+        return None
+    question_id = str(wire.get("question_id") or "")
+    batch = _batch_clarify.get(request_id) if question_id else None
+    if question_id and (batch is None or batch.get("qids") != [question_id]):
+        return None
+    return event_ready, question_id, batch
 
 
 def register(server) -> None:

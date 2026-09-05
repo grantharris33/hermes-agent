@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import threading
 import time
 
@@ -45,11 +46,13 @@ def handoff(monkeypatch):
     server._pending.clear()
     server._pending_prompt_payloads.clear()
     server._answers.clear()
+    server._batch_clarify.clear()
     yield server, db, sid
     server._sessions.pop(sid, None)
     server._pending.clear()
     server._pending_prompt_payloads.clear()
     server._answers.clear()
+    server._batch_clarify.clear()
 
 
 def _record(server, sid: str, request_id: str = "clarify-1") -> None:
@@ -59,6 +62,17 @@ def _record(server, sid: str, request_id: str = "clarify-1") -> None:
         request_id,
         {"question": "Have you finished the browser step?", "choices": ["Continue", "Wait"]},
     )
+
+
+def _batch_payload() -> dict:
+    return {
+        "questions": [{
+            "qid": "q0",
+            "question": "Have you finished the browser step?",
+            "choices": ["Continue (Recommended)", "Wait"],
+            "multi_select": False,
+        }],
+    }
 
 
 def test_non_dashboard_clarify_does_not_create_durable_marker(handoff):
@@ -88,6 +102,73 @@ def test_exact_live_choice_resolves_only_owning_clarify(handoff):
     assert event.is_set()
     assert server.dashboard_clarify_pending_for_sid(sid) is None
     assert server.dashboard_clarify_respond_choice(sid, "clarify-1", 0) == {"status": "conflict"}
+
+
+def test_schema_shaped_single_question_batch_is_actionable_live(handoff, monkeypatch):
+    server, _db, sid = handoff
+    assert server.dashboard_clarify_bind_channel(sid, "channel-a", "capability-a")
+    monkeypatch.setattr(server, "_clarify_timeout_seconds", lambda: None)
+    result = {}
+
+    def ask():
+        result["value"] = server._clarify_block(
+            sid, "", None, questions=_batch_payload()["questions"],
+        )
+
+    worker = threading.Thread(target=ask, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 2
+    while server.dashboard_clarify_pending_for_sid(sid) is None:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    pending = server.dashboard_clarify_pending_for_sid(sid)
+    request_id = pending["request_id"]
+    assert pending["question_id"] == "q0"
+    assert pending["choices"] == ["Continue (Recommended)", "Wait"]
+    assert server.dashboard_clarify_respond_choice(sid, request_id, 0) == {
+        "status": "ok", "mode": "live",
+    }
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert json.loads(result["value"])["answers"] == {"q0": "Continue (Recommended)"}
+    assert request_id not in server._answers
+
+
+def test_live_batch_rejects_same_choices_under_wrong_question_id(handoff):
+    server, _db, sid = handoff
+    assert server.dashboard_clarify_bind_channel(sid, "channel-a", "capability-a")
+    server._dashboard_clarify_record_request(sid, "batch-identity", _batch_payload())
+    event = threading.Event()
+    wrong_payload = _batch_payload()
+    wrong_payload["questions"][0]["qid"] = "q1"
+    server._pending["batch-identity"] = (sid, event)
+    server._pending_prompt_payloads["batch-identity"] = ("clarify.request", wrong_payload)
+    server._batch_clarify["batch-identity"] = {"qids": ["q1"], "answers": {}}
+
+    assert server.dashboard_clarify_respond_choice(sid, "batch-identity", 0) == {
+        "status": "conflict",
+    }
+    assert not event.is_set()
+    assert server._batch_clarify["batch-identity"]["answers"] == {}
+    assert server._dashboard_clarify_read(server._sessions[sid])["status"] == "pending"
+
+
+@pytest.mark.parametrize("questions", [
+    [
+        {"qid": "q0", "question": "First?", "choices": ["Yes"], "multi_select": False},
+        {"qid": "q1", "question": "Second?", "choices": ["No"], "multi_select": False},
+    ],
+    [{"qid": "q0", "question": "Pick many", "choices": ["A", "B"], "multi_select": True}],
+])
+def test_multi_question_and_multi_select_batches_fail_closed(handoff, questions):
+    server, db, sid = handoff
+    assert server.dashboard_clarify_bind_channel(sid, "channel-a", "capability-a")
+
+    server._dashboard_clarify_record_request(sid, "batch-unsupported", {"questions": questions})
+
+    assert db.values == {}
 
 
 def test_fake_id_wrong_session_and_invalid_choice_fail_closed(handoff):
@@ -138,6 +219,25 @@ def test_post_restart_choice_uses_durable_marker_not_prompt_registry(handoff, mo
 
     assert result == {"status": "ok", "mode": "recovered", "scheduled": True}
     assert scheduled == [(sid, "Continue")]
+
+
+def test_schema_shaped_batch_survives_restart_and_uses_server_choice(handoff, monkeypatch):
+    server, _db, sid = handoff
+    assert server.dashboard_clarify_bind_channel(sid, "channel-a", "capability-a")
+    server._dashboard_clarify_record_request(sid, "batch-1", _batch_payload())
+    scheduled = []
+    monkeypatch.setattr(
+        server,
+        "_dashboard_clarify_schedule_recovery",
+        lambda actual_sid, _session, marker: scheduled.append((actual_sid, marker)) or True,
+    )
+
+    result = server.dashboard_clarify_respond_choice(sid, "batch-1", 1)
+
+    assert result == {"status": "ok", "mode": "recovered", "scheduled": True}
+    assert scheduled[0][0] == sid
+    assert scheduled[0][1]["question_id"] == "q0"
+    assert scheduled[0][1]["answer"] == "Wait"
 
 
 def test_unscheduled_recovery_reexposes_exact_card_and_returns_unavailable(handoff, monkeypatch):
