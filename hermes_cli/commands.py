@@ -102,7 +102,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("btw", "Ask a side question about the current conversation without interrupting it", "Session",
                args_hint="<question>", busy_policy="dispatch"),
     CommandDef("agents", "Show active agents and running tasks", "Session",
-               aliases=("tasks",), busy_policy="dispatch"),
+               aliases=("tasks", "missions"), busy_policy="dispatch"),
     CommandDef("journey", "Open the learning journey timeline",
                "Session", aliases=("learning", "memory-graph"), cli_only=True,
                args_hint="[list|delete <id>|edit <id>]", subcommands=("list", "delete", "edit")),
@@ -111,6 +111,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("steer", "Inject a message after the next tool call without interrupting", "Session",
                args_hint="<prompt>", busy_policy="dispatch", busy_handler="steer"),
     CommandDef("goal", "Set a standing goal Hermes works on across turns until achieved", "Session",
+               aliases=("mission",),
                args_hint="[text | draft <text> | show | gate add <cmd> | pause | resume | clear | status | wait <pid> | unwait]",
                argument_mode="mixed", busy_policy="dispatch", busy_handler="goal"),
     CommandDef("heartbeat", "Set a recurring prompt that re-enters this session when idle", "Session",
@@ -368,7 +369,7 @@ for _cmd in COMMAND_REGISTRY:
 HELP_SESSION_SUBGROUPS: dict[str, tuple[str, ...]] = {
     "Context": ("compress", "compact", "context", "ctx", "status"),
     "Background & Automation": (
-        "bg", "btw", "agents", "tasks", "queue", "q", "steer", "goal", "subgoal", "heartbeat", "hb",
+        "bg", "btw", "agents", "tasks", "missions", "queue", "q", "steer", "goal", "mission", "subgoal", "heartbeat", "hb",
         "refine", "loop", "proactive", "moa", "journey", "learning", "memory-graph")}
 
 # All names + aliases the gateway dispatches. Config-gated commands are

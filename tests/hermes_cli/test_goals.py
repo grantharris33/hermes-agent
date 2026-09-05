@@ -151,11 +151,21 @@ def test_goal_command_in_registry():
     assert cmd.name == "goal"
 
 
+def test_mission_aliases_use_existing_durable_surfaces():
+    from hermes_cli.commands import resolve_command
+
+    mission = resolve_command("mission")
+    missions = resolve_command("missions")
+    assert mission is not None and mission.name == "goal"
+    assert missions is not None and missions.name == "agents"
+
+
 def test_goal_command_dispatches_in_cli_registry_helpers():
     """goal shows up in autocomplete / help categories alongside other Session cmds."""
     from hermes_cli.commands import COMMANDS, COMMANDS_BY_CATEGORY
 
     assert "/goal" in COMMANDS
+    assert "/mission" in COMMANDS
     session_cmds = COMMANDS_BY_CATEGORY.get("Session", {})
     assert "/goal" in session_cmds
 

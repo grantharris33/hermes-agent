@@ -4,9 +4,11 @@ title: "Persistent Goals"
 description: "Set a standing goal and let Hermes keep working across turns until it's done. Our take on the Ralph loop."
 ---
 
-# Persistent Goals (`/goal`)
+# Missions and Persistent Goals (`/mission`, `/goal`)
 
-`/goal` gives Hermes a standing objective that survives across turns. After every turn a lightweight judge model checks whether the goal is satisfied by the assistant's last response. If not, Hermes automatically feeds a continuation prompt back into the same session and keeps working — until the goal is achieved, you pause or clear it, or the turn budget runs out.
+`/mission` gives Hermes a standing objective that survives across turns. It is a friendly alias for the proven `/goal` engine: after every turn a lightweight judge model checks whether the goal is satisfied by the assistant's last response. If not, Hermes automatically feeds a continuation prompt back into the same session and keeps working — until the goal is achieved, it needs you, you pause or clear it, or the turn budget runs out.
+
+Use `/mission` when you want an OpenSession-style autonomous owner rather than a one-shot answer. `/missions` opens the same live agent/task overview as `/agents`, so you can inspect delegated work without learning another execution system.
 
 It's our take on the **Ralph loop**, directly inspired by [Codex CLI 0.128.0's `/goal`](https://github.com/openai/codex) by Eric Traut (OpenAI). The core idea — keep a goal alive across turns and don't stop until it's achieved — is theirs. The implementation here is independent and adapted to Hermes' architecture.
 
@@ -57,6 +59,8 @@ What you'll see:
 
 | Command | What it does |
 |---|---|
+| `/mission …` | Alias for every `/goal …` command on CLI, TUI/Desktop, and messaging gateways. |
+| `/missions` | Alias for `/agents`; shows live agents and running tasks. |
 | `/goal <text>` | Set (or replace) the standing goal. Kicks off the first turn immediately so you don't need to send a separate message. |
 | `/goal draft <text>` | Draft a structured completion contract from a plain-language objective, then set it. See [Completion contracts](#completion-contracts). |
 | `/goal show` | Print the active goal's completion contract. |
@@ -70,6 +74,43 @@ What you'll see:
 | `/goal gate` or `/goal gate list` | List the goal's gates and their pass/fail state. |
 | `/goal gate remove <N>` | Remove the Nth gate (1-based). |
 | `/goal gate clear` | Remove all gates. |
+
+## Examples that are safe to copy
+
+### Own a small feature through verification
+
+```text
+/mission Add a health-check endpoint to this project
+outcome: The endpoint is implemented and documented
+verify: Run the focused tests and show their passing output
+constraints: Preserve existing API behavior; do not merge or deploy
+stop when: Ask me if credentials or a product decision are required
+```
+
+Hermes keeps taking concrete steps, delegates when useful, and pauses rather than inventing an answer. Check its work with `/missions` or `/mission status`.
+
+### Hand over a browser sign-in, then continue
+
+```text
+/mission Finish configuring the example integration and verify it end to end. If sign-in or 2FA is required, stop and tell me exactly what to do.
+```
+
+When Hermes pauses, complete the human-only step in the shared computer. If it asked for information, send that answer as a normal message while the mission remains paused. Then send:
+
+```text
+/mission resume
+```
+
+The continuation is queued in the same durable session and can use the answer already in its history. A gateway restart does not erase the paused mission.
+
+### Build and polish a demo without premature completion
+
+```text
+/mission Build the example app, exercise its documented happy path in a real browser, fix any issue you find, and leave a concise verification report
+verify: The example starts from a clean checkout and its happy path completes in the browser
+boundaries: Work only in this repository and its configured preview environment
+stop when: Stop for any destructive production action or human authentication
+```
 
 Works identically on the CLI and every gateway platform (Telegram, Discord, Slack, Matrix, Signal, WhatsApp, SMS, iMessage, Webhook, API server, and the web dashboard).
 

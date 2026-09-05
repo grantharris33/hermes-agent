@@ -231,6 +231,20 @@ def test_goal_resume_without_goal_stays_exec(server, session):
     assert "No goal to resume" in r["result"]["output"]
 
 
+def test_mission_alias_resumes_a_paused_goal(server, session):
+    from hermes_cli.goals import GoalManager
+
+    sid, session_key, _ = session
+    _exhaust_budget(session_key, "finish the browser sign-in")
+
+    r = _call(server, "command.dispatch", name="mission", arg="resume", session_id=sid)
+
+    result = r["result"]
+    assert result["type"] == "send"
+    assert result["message"].startswith("[Continuing toward your standing goal]")
+    assert GoalManager(session_key).state.status == "active"
+
+
 # ── slash.exec /goal routing ──────────────────────────────────────────
 
 
