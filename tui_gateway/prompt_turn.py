@@ -81,10 +81,18 @@ def _plan_goal_compression_recovery(
 
 def _admit_prompt_turn(
     sid: str, session: dict, text: Any, image_paths: list[str] | None,
-    queued_prompt_generation: int | None) -> tuple[list[str], Any] | None:
+    queued_prompt_generation: int | None, dashboard_recovery_request_id: str,
+) -> tuple[list[str], Any] | None:
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
+    if handoff_error := dashboard_clarify_prompt_admission_error(
+        session, dashboard_recovery_request_id,
+    ):
+        with session["history_lock"]:
+            session["running"] = False
+        _emit("error", sid, {"message": handoff_error})
+        return None
     # When the session already holds its lease this is a cheap dict check. See #94778.
     if (ownership_refusal := _ensure_active_session_slot(sid, session)) is not None:
         logger.info(
@@ -122,11 +130,15 @@ def _record_turn_marker(session: dict, text: Any) -> str:
     it; the post-write cancel check closes the inverse race (Stop landed first, no file)."""
     marker_home = _session_home(session)
     marker_key = str(session.get("session_key") or "")
+    from secrets import token_hex
+
+    turn_generation = token_hex(16)
     marker_attempt = int(session.pop("_auto_continue_attempt", 0) or 0)
     marker_text = session.pop("_auto_continue_prompt", None) or text
     if isinstance(marker_text, str) and marker_text.strip():
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
+            session["_active_turn_generation"] = turn_generation
         record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt)
         with session["history_lock"]:
             marker_cancelled = bool(session.get("_turn_cancel_requested"))
@@ -432,6 +444,7 @@ class _TurnRun:
     error_detail: str = ""
     prompt_text: str = ""
     marker_key: str = ""
+    turn_generation: str = ""
     receipt_attempted: bool = False
 
 
@@ -619,7 +632,10 @@ def _absorb_turn_result(
     return status_note
 
 
-def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None, cols: int):
+def _complete_turn_payload(
+    session: dict, st: _TurnRun, status_note: str | None, cols: int,
+    display_metadata: dict | None = None,
+):
     """``(payload, raw, status)`` for message.complete; retains/clears the inflight turn and
     settles the hosted-room terminal receipt."""
     result, agent = st.result, st.agent
@@ -672,6 +688,13 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
             **({"error": str(error_value or raw)} if status == "error" else {})})
         st.receipt_committed = True
     if st.receipt_committed:
+        _dashboard_clarify_finish_turn(
+            session,
+            turn_marker_key=st.marker_key,
+            turn_generation=st.turn_generation,
+            request_id=str((display_metadata or {}).get("dashboard_clarify_request_id") or ""),
+            outcome=status,
+        )
         _retire_turn_marker(session, st.marker_key)
     return payload, raw, status
 
@@ -754,8 +777,13 @@ def _run_prompt_submit(
     rid, sid: str, session: dict, text: Any, *, display_kind: str | None = None,
     display_metadata: dict | None = None, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
-    terminal_callback: Callable[[dict[str, Any]], None] | None = None) -> bool:
-    admitted = _admit_prompt_turn(sid, session, text, image_paths, queued_prompt_generation)
+    terminal_callback: Callable[[dict[str, Any]], None] | None = None,
+    turn_admitted_callback: Callable[[str, str], None] | None = None,
+    dashboard_recovery_request_id: str = "") -> bool:
+    admitted = _admit_prompt_turn(
+        sid, session, text, image_paths, queued_prompt_generation,
+        dashboard_recovery_request_id,
+    )
     if admitted is None:
         return False
     images, agent = admitted
@@ -783,9 +811,16 @@ def _run_prompt_submit(
         st = _TurnRun(
             session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
             receipt_committed=terminal_callback is None)
-        st.marker_key = _record_turn_marker(session, text)
         goal_followup = None
         try:
+            st.marker_key = _record_turn_marker(session, text)
+            st.turn_generation = str(session.get("_active_turn_generation") or "")
+            # Recovery callers use this boundary as their durable exactly-once fence: the generic
+            # crash marker exists before the callback records "admitted", and no model/tool work
+            # has started yet. Keep it inside the protected lifecycle so a receipt failure still
+            # clears running/context state and emits the ordinary terminal error.
+            if turn_admitted_callback is not None:
+                turn_admitted_callback(st.marker_key, st.turn_generation)
             prepared = _prepare_turn_input(sid, session, st, text, images)
             if prepared is None:
                 return
@@ -795,7 +830,9 @@ def _run_prompt_submit(
                 display_metadata)
             status_note = _absorb_turn_result(
                 sid, session, st, text, display_kind, display_metadata)
-            payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
+            payload, raw, status = _complete_turn_payload(
+                session, st, status_note, cols, display_metadata,
+            )
             _emit("message.complete", sid, payload)
             goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)
             if status == "complete":
@@ -832,6 +869,8 @@ def _run_prompt_submit(
                 with session["history_lock"]:
                     if session.get("_active_turn_marker_key") == st.marker_key:
                         session.pop("_active_turn_marker_key", None)
+                    if session.get("_active_turn_generation") == st.turn_generation:
+                        session.pop("_active_turn_generation", None)
                     session.pop("_hosted_room_task", None)
             session.pop("_auto_continue_scheduled", None)
             _emit_settled_session_info(sid, session, st.agent)

@@ -549,6 +549,8 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    if handoff_error := dashboard_clarify_prompt_admission_error(session):
+        return _err(rid, 4092, handoff_error, {"reason": "dashboard_handoff_pending"})
     hosted_task = params.get("_hosted_task")
     hosted_terminal_callback = params.get("_hosted_terminal_callback")
     internal_hosted_submit = hosted_task is not None or hosted_terminal_callback is not None
@@ -1078,16 +1080,25 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     if proxied := _respond_compute_host_clarify(rid, params):
         return proxied
-    return _respond(rid, params, "answer", allow_expired=True)
+    return _respond(
+        rid, params, "answer", allow_expired=True, expected_event="clarify.request",
+    )
 
 
 _LATE_RESPOND_KEYS = {
-    "terminal.read.respond": "text", "preview.read.respond": "text", "preview.act.respond": "text",
-    "window.read.respond": "text", "tour.respond": "text", "mcp.setup.respond": "result",
-    "sudo.respond": "password", "secret.respond": "value"}
-for _name, _key in _LATE_RESPOND_KEYS.items():
-    method(_name)(lambda rid, params, _k=_key: _respond(rid, params, _k, allow_expired=True))
-del _name, _key
+    "terminal.read.respond": ("text", "terminal.read.request"),
+    "preview.read.respond": ("text", "preview.read.request"),
+    "preview.act.respond": ("text", "preview.act.request"),
+    "window.read.respond": ("text", "window.read.request"),
+    "tour.respond": ("text", "tour.request"),
+    "mcp.setup.respond": ("result", "mcp.setup.request"),
+    "sudo.respond": ("password", "sudo.request"),
+    "secret.respond": ("value", "secret.request"),
+}
+for _name, (_key, _event) in _LATE_RESPOND_KEYS.items():
+    method(_name)(lambda rid, params, _k=_key, _e=_event: _respond(
+        rid, params, _k, allow_expired=True, expected_event=_e))
+del _name, _key, _event
 
 
 # ── approvals ───────────────────────────────────────────────────────────────

@@ -7,13 +7,16 @@ reached through the late-binding seam (cycle-safe).
 
 import asyncio
 import functools
+import hmac
 import json
 import logging
 import re
+import secrets
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from hermes_cli.pty_session import RegistryFull
 from hermes_cli.web_deps import LateState, late
@@ -49,6 +52,164 @@ def _get_event_state(app: "FastAPI"):
 
 
 _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _require_dashboard_control_token(request: Request) -> None:
+    """CSRF fence for state-changing chat controls.
+
+    The value is injected into same-origin dashboard HTML and is never available to a foreign
+    origin.  Requiring the non-simple header also forces a browser CORS preflight before a hostile
+    page could submit a handoff answer with ambient cookies.
+    """
+    from hermes_cli.web_server import _SESSION_TOKEN
+
+    if getattr(request.app.state, "auth_required", False):
+        # The auth middleware has already validated the session cookie. Gated HTML intentionally
+        # omits the legacy token, so require the browser's non-forgeable same-origin fetch signal.
+        if request.headers.get("Sec-Fetch-Site", "").lower() != "same-origin":
+            raise HTTPException(status_code=403, detail="same-origin dashboard request required")
+        return
+    supplied = request.headers.get("X-Hermes-Session-Token", "")
+    if not supplied or not hmac.compare_digest(supplied.encode(), _SESSION_TOKEN.encode()):
+        raise HTTPException(status_code=403, detail="dashboard control token required")
+
+
+def _dashboard_computer_url() -> Optional[str]:
+    """Validated deployment-provided human console URL; never bake a private host into the bundle."""
+    from hermes_cli.config import load_config_readonly
+
+    dashboard = load_config_readonly().get("dashboard") or {}
+    raw = str(dashboard.get("computer_url") or "").strip() if isinstance(dashboard, dict) else ""
+    if not raw or len(raw) > 2_048:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+    return urllib.parse.urlunsplit(("https", parsed.netloc, parsed.path or "/", "", ""))
+
+
+def _active_sid_for_channel(app: FastAPI, channel: str) -> str:
+    if not _VALID_CHANNEL_RE.fullmatch(channel):
+        raise HTTPException(status_code=400, detail="invalid chat channel")
+    from hermes_cli.web_server import _get_pty_channel_bindings, _get_pty_channel_sessions
+
+    binding = _get_pty_channel_sessions(app).get(channel)
+    sid = str(binding.get("session_id") or "") if isinstance(binding, dict) else ""
+    current_capability = _get_pty_channel_bindings(app).get(channel, "")
+    stored_capability = str(binding.get("capability") or "") if isinstance(binding, dict) else ""
+    if not sid or binding.get("source") != "gateway_ws":
+        raise HTTPException(status_code=409, detail="chat session is not ready")
+    if not current_capability or not stored_capability:
+        raise HTTPException(status_code=409, detail="chat session is not ready")
+    if not hmac.compare_digest(current_capability.encode(), stored_capability.encode()):
+        raise HTTPException(status_code=409, detail="chat session is not ready")
+    return sid
+
+
+def _channel_binding(app: FastAPI, channel: str) -> str:
+    from hermes_cli.web_server import _get_pty_channel_bindings
+
+    bindings = _get_pty_channel_bindings(app)
+    if not (binding := bindings.get(channel)):
+        binding = bindings[channel] = secrets.token_urlsafe(32)
+    return binding
+
+
+class _GatewaySessionObserver:
+    """Bind one PTY channel only from its correlated lifecycle RPC response."""
+
+    _SESSION_METHODS = frozenset({"session.activate", "session.create", "session.resume"})
+
+    def __init__(self, app: FastAPI, channel: str, capability: str, connection_id: str) -> None:
+        self.app = app
+        self.channel = channel
+        self.capability = capability
+        self.connection_id = connection_id
+        self.pending: dict[object, str] = {}
+
+    def on_request(self, frame: dict) -> None:
+        request_id, method = frame.get("id"), frame.get("method")
+        if request_id is not None and method in self._SESSION_METHODS:
+            self.pending[request_id] = str(method)
+
+    def on_frame(self, frame: dict) -> None:
+        request_id = frame.get("id")
+        if request_id not in self.pending:
+            return
+        self.pending.pop(request_id, None)
+        result = frame.get("result")
+        sid = str(result.get("session_id") or "") if isinstance(result, dict) else ""
+        if not sid:
+            return
+        from hermes_cli.web_server import _get_pty_channel_sessions
+        from tui_gateway import server
+
+        _get_pty_channel_sessions(self.app)[self.channel] = {
+            "capability": self.capability,
+            "connection_id": self.connection_id,
+            "session_id": sid,
+            "source": "gateway_ws",
+        }
+        server.dashboard_clarify_bind_channel(sid, self.channel, self.capability)
+
+    def on_close(self) -> None:
+        from hermes_cli.web_server import _get_pty_channel_sessions
+
+        sessions = _get_pty_channel_sessions(self.app)
+        current = sessions.get(self.channel)
+        if isinstance(current, dict) and current.get("connection_id") == self.connection_id:
+            sessions.pop(self.channel, None)
+
+
+@router.get("/api/chat/clarify")
+async def dashboard_clarify_pending(request: Request, channel: str) -> dict:
+    """Return only the server-owned pending handoff for this PTY channel."""
+    _require_dashboard_control_token(request)
+    sid = _active_sid_for_channel(request.app, channel)
+    from tui_gateway import server
+
+    pending = await asyncio.to_thread(server.dashboard_clarify_pending_for_sid, sid)
+    return {"computer_url": _dashboard_computer_url(), "pending": pending, "session_id": sid}
+
+
+@router.post("/api/chat/clarify/respond")
+async def dashboard_clarify_respond(request: Request) -> dict:
+    """Answer the exact pending handoff without writing bytes into the terminal PTY."""
+    _require_dashboard_control_token(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    channel = body.get("channel")
+    request_id = body.get("request_id")
+    choice_index = body.get("choice_index")
+    if not isinstance(channel, str) or not isinstance(request_id, str) or not request_id:
+        raise HTTPException(status_code=400, detail="channel and request_id required")
+    if type(choice_index) is not int:
+        raise HTTPException(status_code=400, detail="choice_index must be an integer")
+    sid = _active_sid_for_channel(request.app, channel)
+    from tui_gateway import server
+
+    result = await asyncio.to_thread(
+        server.dashboard_clarify_respond_choice, sid, request_id, choice_index,
+    )
+    status = result.get("status")
+    if status == "invalid":
+        raise HTTPException(status_code=400, detail="invalid handoff choice")
+    if status == "conflict":
+        raise HTTPException(status_code=409, detail="handoff request is no longer pending")
+    if status != "ok":
+        raise HTTPException(status_code=503, detail="handoff response could not be persisted")
+    return {**result, "session_id": sid}
 
 
 def _ws_auth_mode() -> str:
@@ -426,7 +587,8 @@ async def pty_ws(ws: WebSocket) -> None:
     resume = raw_resume
     profile = ws.query_params.get("profile") or None
     channel = _channel_or_close_code(ws)
-    sidecar_url = _build_sidecar_url(channel) if channel else None
+    channel_binding = _channel_binding(ws.app, channel) if channel else None
+    sidecar_url = _build_sidecar_url(channel, channel_binding) if channel else None
     force_fresh = (ws.query_params.get("fresh") or "").strip().lower() in {"1", "true", "yes", "on"}
     active_session_file: Optional[Path] = None
 
@@ -447,7 +609,10 @@ async def pty_ws(ws: WebSocket) -> None:
                 # See #93518.
                 await ws.send_json({"type": "resume", "id": resume})
 
-    resolve_kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": profile}
+    resolve_kwargs = {
+        "resume": resume, "sidecar_url": sidecar_url, "profile": profile,
+        "gateway_channel": channel, "gateway_binding": channel_binding,
+    }
     if active_session_file is not None:
         resolve_kwargs["active_session_file"] = str(active_session_file)
 
@@ -544,6 +709,19 @@ async def gateway_ws(ws: WebSocket) -> None:
         return
     from tui_gateway.ws import handle_ws
 
+    channel = _channel_or_close_code(ws)
+    binding = ws.query_params.get("binding", "")
+    connection_id = secrets.token_hex(16)
+    if channel:
+        from hermes_cli.web_server import _get_pty_channel_bindings
+
+        expected = _get_pty_channel_bindings(ws.app).get(channel, "")
+        if not expected or not binding or not hmac.compare_digest(binding.encode(), expected.encode()):
+            await ws.close(code=4403, reason="invalid PTY channel capability")
+            return
+
+    observer = _GatewaySessionObserver(ws.app, channel, binding, connection_id) if channel else None
+
     # The authenticated identity (ticket / internal credential) stamped by
     # _ws_auth_reason becomes the identity authority for privileged RPCs
     # (browser.controller.register). None on the legacy token path.
@@ -551,6 +729,9 @@ async def gateway_ws(ws: WebSocket) -> None:
         ws,
         auth_identity=getattr(ws, "_hermes_auth_identity", None),
         subprotocol=getattr(ws, "_hermes_ws_subprotocol", None),
+        on_close=observer.on_close if observer else None,
+        on_frame=observer.on_frame if observer else None,
+        on_request=observer.on_request if observer else None,
     )
 
 

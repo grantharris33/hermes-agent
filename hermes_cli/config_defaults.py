@@ -917,6 +917,9 @@ DEFAULT_CONFIG = {
     "dashboard": {
         # Visual theme: "default" | "midnight" | "ember" | "mono" | "cyberpunk" | "rose"
         "theme": "default",
+        # Optional HTTPS human-console URL rendered on a request-bound dashboard handoff card.
+        # Empty hides the affordance. Credentials, query strings, and fragments are rejected.
+        "computer_url": "",
         # Process-isolation rollout controls. Read via the raw config loader, so tui_gateway.server
         # also owns explicit defaults.
         "turn_isolation": False,

@@ -134,6 +134,8 @@ async def _lifespan(app: "FastAPI"):
     app.state.event_channels = {}  # dict[str, set]
     app.state.event_lock = asyncio.Lock()
     app.state.pty_active_session_files = {}  # dict[str, Path]
+    app.state.pty_channel_bindings = {}  # dict[str, str] — server-minted PTY capabilities
+    app.state.pty_channel_sessions = {}  # dict[str, dict] — trusted gateway-emitted sid bindings
     # Serializes chat-argv resolution so concurrent /api/pty connections don't
     # overlap ``npm install`` / ``npm run build``. Locks live on app.state (not
     # module globals) so they bind to the running loop, not the import-time one.
@@ -278,6 +280,14 @@ def _get_chat_argv_lock(app: "FastAPI") -> asyncio.Lock:
 
 def _get_pty_active_session_files(app: "FastAPI") -> dict[str, Path]:
     return _app_state_default(app, "pty_active_session_files", dict)
+
+
+def _get_pty_channel_bindings(app: "FastAPI") -> dict[str, str]:
+    return _app_state_default(app, "pty_channel_bindings", dict)
+
+
+def _get_pty_channel_sessions(app: "FastAPI") -> dict[str, dict]:
+    return _app_state_default(app, "pty_channel_sessions", dict)
 
 
 app = FastAPI(title="Hermes Agent", version=__version__, lifespan=_lifespan)

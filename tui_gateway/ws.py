@@ -6,6 +6,7 @@ after accept). Mount as ``@app.websocket("/api/ws") async def ws(ws): await hand
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import concurrent.futures
 import json
 import logging
@@ -81,13 +82,14 @@ class WSTransport:
     deadlock, so it detects that and fires-and-forgets. Loop-thread callers needing completion use ``write_async``."""
 
     def __init__(self, ws: Any, loop: asyncio.AbstractEventLoop, *, peer: str = "unknown",
-                 auth_identity: dict | None = None) -> None:
+                 auth_identity: dict | None = None, on_frame=None) -> None:
         self._ws = ws
         self._loop = loop
         self._peer = peer
         #: Server-verified identity from the WS-upgrade credential, stamped by ``web_server._ws_auth_reason``; None
         #: for legacy-token/stdio. RPC params can never populate it: sole identity authority for browser controllers.
         self.auth_identity = auth_identity
+        self._on_frame = on_frame
         self._closed = False
         # Token-coalescing buffer. The lock guards the buffer + "armed" flag against worker threads
         # calling write(); the timer handle is only ever touched on the loop thread.
@@ -101,6 +103,9 @@ class WSTransport:
     def write(self, obj: dict) -> bool:
         if self._closed:
             return False
+        if self._on_frame is not None:
+            with contextlib.suppress(Exception):
+                self._on_frame(obj)
         line = json.dumps(obj, ensure_ascii=False)
         try:
             on_loop = asyncio.get_running_loop() is self._loop
@@ -167,6 +172,9 @@ class WSTransport:
         ahead of it in the SAME batch so nothing slips between."""
         if self._closed:
             return False
+        if self._on_frame is not None:
+            with contextlib.suppress(Exception):
+                self._on_frame(obj)
         with self._token_lock:
             batch, self._pending_tokens = self._pending_tokens, []
             batch.append(json.dumps(obj, ensure_ascii=False))
@@ -236,7 +244,10 @@ class _SendFailed(Exception):
     """Raised by handle_ws._reply when a reply could not be written: ends the read loop."""
 
 
-async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: str | None = None) -> None:
+async def handle_ws(
+    ws: Any, *, auth_identity: dict | None = None, subprotocol: str | None = None,
+    on_frame=None, on_close=None, on_request=None,
+) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``. *auth_identity* is the server-minted
     ``{user_id, provider}`` recorded at WS-upgrade auth, stored as ``WSTransport.auth_identity`` (the only identity
     authority for browser-controller registration); callers that omit it (harnesses, embedded TUI child) get None."""
@@ -263,7 +274,9 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         _note_dashboard_client_activity(force=True)
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
-        transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity)
+        transport = WSTransport(
+            ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity, on_frame=on_frame,
+        )
         # resolve_skin() is sync I/O + CPU; pooled so the read loop can drain the frontend's initial RPC burst.
         skin_payload = await asyncio.to_thread(server.resolve_skin)
         # change_events: this backend broadcasts pet/cron/sessions.changed, so clients can demote legacy
@@ -322,6 +335,9 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
                 continue
             req_id = req.get("id") if isinstance(req, dict) else None
             req_method = req.get("method") if isinstance(req, dict) else None
+            if on_request is not None and isinstance(req, dict):
+                with contextlib.suppress(Exception):
+                    on_request(req)
             if req_method == "gateway.ping":
                 await _reply({"jsonrpc": "2.0", "result": {"ok": True}, "id": req_id}, "send_failed_after_heartbeat",
                              "ws heartbeat reply send failed peer=%s id=%s", peer, req_id)
@@ -373,6 +389,9 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
             await ws.close()
         except Exception as exc:
             _log.debug("ws close failed peer=%s error=%s", peer, exc)
+        if on_close is not None:
+            with contextlib.suppress(Exception):
+                on_close()
         _log.info(
             "ws closed peer=%s reason=%s messages=%d parse_errors=%d "
             "dispatch_crashes=%d send_failures=%d reaped_sessions=%d detached_sessions=%d",

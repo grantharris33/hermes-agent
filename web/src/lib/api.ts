@@ -312,6 +312,20 @@ export interface SessionQueryOptions {
   excludeSources?: string[];
 }
 
+export interface DashboardClarifyPrompt {
+  choices: string[];
+  created_at?: number;
+  question: string;
+  request_id: string;
+  retry_message?: string;
+}
+
+export interface DashboardClarifyStatus {
+  computer_url: string | null;
+  pending: DashboardClarifyPrompt | null;
+  session_id: string;
+}
+
 function normalizeSessionQueryOptions(
   profileOrOptions?: string | SessionQueryOptions,
   order: "created" | "recent" = "created",
@@ -340,6 +354,29 @@ function appendSessionFilters(url: string, options: SessionQueryOptions): string
 
 export const api = {
   buildWsUrl,
+  getDashboardClarify: (channel: string) =>
+    fetchJSON<DashboardClarifyStatus>(
+      `/api/chat/clarify?channel=${encodeURIComponent(channel)}`,
+    ),
+  respondDashboardClarify: (
+    channel: string,
+    requestId: string,
+    choiceIndex: number,
+  ) =>
+    fetchJSON<{
+      mode: "live" | "recovered";
+      scheduled?: boolean;
+      session_id: string;
+      status: "ok";
+    }>("/api/chat/clarify/respond", {
+      body: JSON.stringify({
+        channel,
+        choice_index: choiceIndex,
+        request_id: requestId,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    }),
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).

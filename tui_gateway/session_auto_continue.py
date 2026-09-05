@@ -62,13 +62,20 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     # its execution generation and duplicate work.
     if session.get("source") == "bot_room":
         return None
+    if handoff := dashboard_clarify_resume_gate(sid, session):
+        return handoff
     home = _session_home(session)
-    if (marker := read_turn_marker(home, session_key)) is None:
+    marker_key = str(session.pop("_dashboard_clarify_generic_turn_key", "") or session_key)
+    if (marker := read_turn_marker(home, marker_key)) is None:
         return None
     enabled, freshness_secs, max_attempts = _auto_continue_config()
     age = time.time() - marker["started_at"]
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
-        clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
+        clear_turn_marker(home, marker_key)  # stale/disabled/crash-looping: a manual message continues
+        dashboard_clarify_abandon_generic_recovery(
+            session,
+            "disabled" if not enabled else "stale" if age > freshness_secs else "attempts_exhausted",
+        )
         return None
     if session.get("_auto_continue_scheduled"):
         return None
@@ -109,7 +116,10 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         try:
             _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
             _emit("message.start", sid)
-            _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue")
+            handoff_kwargs = dashboard_clarify_generic_recovery_callbacks(session)
+            _run_prompt_submit(
+                rid, sid, session, text, display_kind="auto_continue", **handoff_kwargs,
+            )
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
             _notif_release_turn(session)  # rebound from session_notifications

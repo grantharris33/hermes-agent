@@ -81,6 +81,16 @@ class FakeTerminal {
 const maybeReloadForLoopbackWsAuthFailure = vi.fn(() => false);
 const apiMocks = vi.hoisted(() => ({
   buildWsUrl: vi.fn(async () => "ws://localhost/api/pty?channel=chat-1"),
+  getDashboardClarify: vi.fn(async () => ({
+    computer_url: null,
+    pending: null,
+    session_id: "runtime-chat",
+  })),
+  respondDashboardClarify: vi.fn(async () => ({
+    mode: "live" as const,
+    session_id: "runtime-chat",
+    status: "ok" as const,
+  })),
 }));
 
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: FakeFitAddon }));
@@ -194,6 +204,18 @@ beforeEach(() => {
   maybeReloadForLoopbackWsAuthFailure.mockClear();
   apiMocks.buildWsUrl.mockReset();
   apiMocks.buildWsUrl.mockResolvedValue("ws://localhost/api/pty?channel=chat-1");
+  apiMocks.getDashboardClarify.mockReset();
+  apiMocks.getDashboardClarify.mockResolvedValue({
+    computer_url: null,
+    pending: null,
+    session_id: "runtime-chat",
+  });
+  apiMocks.respondDashboardClarify.mockReset();
+  apiMocks.respondDashboardClarify.mockResolvedValue({
+    mode: "live",
+    session_id: "runtime-chat",
+    status: "ok",
+  });
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal(
     "ResizeObserver",

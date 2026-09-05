@@ -1946,6 +1946,7 @@ def _(rid, params: dict) -> dict:
     # rotating session_key mid-turn).
     with session["history_lock"]:
         active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
+        session.pop("_active_turn_generation", None)
     _retire_turn_marker(session, active_marker_key)
     return _ok(rid, {"status": "interrupted"})
 

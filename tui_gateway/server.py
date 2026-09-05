@@ -642,6 +642,9 @@ def _pending_clarify_request_payload(sid: str) -> dict | None:
                 snapshot["answers"] = dict(batch["answers"])
             return snapshot
     if (session := _sessions.get(sid)) is not None:
+        durable = _dashboard_clarify_public_marker(_dashboard_clarify_read(session))
+        if durable is not None:
+            return durable
         with session.get("history_lock", threading.Lock()):
             pending = session.get("_compute_host_pending_clarify")
             return dict(pending) if isinstance(pending, dict) else None
@@ -1243,6 +1246,8 @@ def _block(event: str, sid: str, payload: dict, timeout: float | None = 300, bat
             # Multi-question clarify: per-question answers accumulate here (update-in-place until every
             # qid is locked); locked answers survive a timeout — see the batch read-out below.
             _batch_clarify[rid] = {"qids": list(batch_qids), "answers": {}}
+    if event == "clarify.request":
+        _dashboard_clarify_record_request(sid, rid, payload)
     answered, batch_answers = False, None
     try:
         _emit(event, sid, payload)
@@ -1257,6 +1262,10 @@ def _block(event: str, sid: str, payload: dict, timeout: float | None = 300, bat
             answer = _answers.pop(rid, "")
             if (batch_state := _batch_clarify.pop(rid, None)) is not None:
                 batch_answers = dict(batch_state["answers"])
+    if event == "clarify.request" and not answered and not answer_present:
+        _dashboard_clarify_expire(sid, rid)
+    elif event == "clarify.request" and answer_present:
+        _dashboard_clarify_note_live_answer(sid, rid, answer)
     expire = lambda: _emit(f"{event.removesuffix('.request')}.expire", sid, {"request_id": rid})
     if batch_qids is not None:
         # Cancel-all (respond with no question_id) resolves via _answers with "" — a plain cancel, not a partial result.
@@ -3029,14 +3038,20 @@ def _start_usage_ticker(sid: str, agent, interval: float = 1.0) -> tuple[threadi
 # ── Methods: respond ─────────────────────────────────────────────────
 
 
-def _respond(rid, params, key, *, allow_expired=False):
+def _respond(rid, params, key, *, allow_expired=False, expected_event=None):
     r = params.get("request_id", "")
     question_id = str(params.get("question_id") or "")
     with _prompt_lock:
         entry = _pending.get(r)
         if not entry:
             return _ok(rid, {"status": "expired"}) if allow_expired and r else _err(rid, 4009, f"no pending {key} request")
-        _, ev = entry
+        owner_sid, ev = entry
+        event = _pending_prompt_payloads.get(r, ("", {}))[0]
+        if expected_event is not None and event != expected_event:
+            return _err(rid, 4009, f"no pending {key} request")
+        expected_sid = str(params.get("expected_session_id") or "")
+        if expected_sid and owner_sid != expected_sid:
+            return _err(rid, 4009, f"no pending {key} request")
         batch = _batch_clarify.get(r)
         if batch is not None and question_id:
             # Per-question lock; update-in-place so an answer stays editable until every qid is locked (Confirm).
@@ -3201,6 +3216,7 @@ from .mcp_rpc_helpers import (  # noqa: E402, F401
 from . import (  # noqa: E402
     methods_voice as _methods_voice, methods_browser as _methods_browser, methods_slash as _methods_slash,
     methods_complete_helpers as _methods_complete_helpers, session_auto_continue as _session_auto_continue,
+    dashboard_clarify as _dashboard_clarify,
     agent_callbacks as _agent_callbacks, session_history as _session_history,
     prompt_attachments as _prompt_attachments, session_notifications as _session_notifications,
     tool_progress as _tool_progress, change_watcher as _change_watcher,
@@ -3217,6 +3233,7 @@ from . import (  # noqa: E402
 for _m in (
     _session_reaper, _session_lifecycle, _session_workdir, _compute_host_bridge, _model_switch,
     _session_compression, _change_watcher, _tool_progress, _session_notifications,
+    _dashboard_clarify,
     _prompt_attachments, _session_history, _agent_callbacks, _session_auto_continue,
     _methods_complete_helpers, _methods_slash, _methods_voice, _methods_browser,
     _methods_browser_control, _methods_session, _methods_prompt, _methods_config,

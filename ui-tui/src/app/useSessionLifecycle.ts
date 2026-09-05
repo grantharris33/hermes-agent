@@ -214,7 +214,9 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       resetSession()
       setSessionStartedAt(Date.now())
 
-      writeActiveSessionFile(r.session_id)
+      // The runtime id dies with the gateway process; the canonical stored id
+      // is what a restarted dashboard can resume from SessionDB.
+      writeActiveSessionFile(r.stored_session_id ?? r.session_id)
       patchUiState({
         info,
         sid: r.session_id,

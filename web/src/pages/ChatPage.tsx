@@ -31,13 +31,15 @@ import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router";
 
 import { ChatSidebar } from "@/components/ChatSidebar";
+import { DashboardHandoffCard } from "@/components/DashboardHandoffCard";
 import { ChatSessionList } from "@/components/ChatSessionList";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
-import { api } from "@/lib/api";
+import { api, type DashboardClarifyPrompt } from "@/lib/api";
 import { latchChatActivation } from "@/lib/chat-activation";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { normalizeSessionTitle } from "@/lib/chat-title";
+import { ptyAttachToken, stableChannelId } from "@/lib/pty-identity";
 import { createPtyCompositionForwarder } from "@/lib/pty-composition";
 import { shouldRestoreTerminalFocus } from "@/lib/pty-focus";
 import { PtyResumeSanitizer } from "@/lib/pty-resume-sanitizer";
@@ -81,48 +83,6 @@ import { maybeReloadForLoopbackWsAuthFailure } from "@/lib/dashboard-auth-reload
 import { PluginSlot } from "@/plugins";
 import { useTheme } from "@/themes";
 import { useProfileScope } from "@/contexts/useProfileScope";
-
-// Stable per-browser token identifying THIS chat tab's keep-alive PTY session.
-// Sent as ?attach=; lets a refresh/disconnect reattach to the same live process
-// instead of spawning a fresh one. Per-localStorage, so other devices can't grab it.
-// ``rotate`` mints a new token — used when the user explicitly starts a fresh
-// session so the old keep-alive PTY is NOT reattached (the registry reaps it).
-const PTY_ATTACH_TOKEN_KEY = "hermes.pty.token.chat";
-function ptyAttachToken(rotate = false): string {
-  let t = "";
-  if (!rotate) {
-    try {
-      t = window.localStorage.getItem(PTY_ATTACH_TOKEN_KEY) ?? "";
-    } catch {
-      /* private mode / storage blocked */
-    }
-  }
-  if (!t) {
-    const a = new Uint8Array(16);
-    crypto.getRandomValues(a);
-    t = Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
-    try {
-      window.localStorage.setItem(PTY_ATTACH_TOKEN_KEY, t);
-    } catch {
-      /* ignore */
-    }
-  }
-  return t;
-}
-
-// Channel id ties this chat tab's PTY child (publisher) to its sidebar
-// (subscriber).  Generated once per mount so a tab refresh starts a fresh
-// channel — the previous PTY child terminates with the old WS, and its
-// channel auto-evicts when no subscribers remain.
-function generateChannelId(scope?: string): string {
-  const prefix = scope ? "chat" : "chat-fresh";
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `${prefix}-${crypto.randomUUID()}`;
-  }
-  return `${prefix}-${Math.random().toString(36).slice(2)}-${Date.now().toString(
-    36,
-  )}`;
-}
 
 // Colors for the terminal body.  Matches the dashboard's dark teal canvas
 // with cream foreground — we intentionally don't pick monokai or a loud
@@ -206,6 +166,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setHasActivated((prev) => latchChatActivation(prev, isActive));
   }, [isActive]);
   const [searchParams, setSearchParams] = useSearchParams();
+  const resumeParam = searchParams.get("resume");
+  const { profile: scopedProfile } = useProfileScope();
+  const ptyIdentityScope = `${resumeParam ?? ""}\0${scopedProfile}`;
   // Lazy-init: the missing-token check happens at construction so the effect
   // body doesn't have to setState (React 19's set-state-in-effect rule).
   // In gated (OAuth) mode the server intentionally omits the session token —
@@ -270,6 +233,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer]);
   const startFreshPty = useCallback(() => {
+    ptyAttachToken(ptyIdentityScope, true);
     forceFreshPtyRef.current = true;
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
@@ -280,11 +244,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setLastCloseCode(null);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
-  }, [clearReconnectTimer]);
+  }, [clearReconnectTimer, ptyIdentityScope]);
   const startFreshDashboardChat = useCallback(() => {
     const next = new URLSearchParams(searchParams);
 
     next.delete("resume");
+    ptyAttachToken(`\0${scopedProfile}`, true);
     forceFreshPtyRef.current = true;
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
@@ -296,7 +261,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setLastCloseCode(null);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
-  }, [clearReconnectTimer, searchParams, setSearchParams]);
+  }, [clearReconnectTimer, scopedProfile, searchParams, setSearchParams]);
   // Raw state for the mobile side-sheet + a derived value that force-
   // closes whenever the chat tab isn't active.  The *derived* value is
   // what side-effects (body-scroll lock, keydown listener, portal render)
@@ -325,6 +290,15 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     scope: string;
     title: string | null;
   }>({ scope: "", title: null });
+  const [handoffState, setHandoffState] = useState<{
+    prompt: DashboardClarifyPrompt | null;
+    scope: string;
+  }>({ prompt: null, scope: "" });
+  const [handoffAnswering, setHandoffAnswering] = useState(false);
+  const [handoffError, setHandoffError] = useState<string | null>(null);
+  const [handoffComputerUrl, setHandoffComputerUrl] = useState<string | null>(
+    null,
+  );
   const { t } = useI18n();
   const closeMobilePanel = useCallback(() => setMobilePanelOpenRaw(false), []);
   const modelToolsLabel = useMemo(
@@ -354,21 +328,82 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // Sessions page relies on `/chat?resume=<id>` changing at runtime, so we must
   // treat the current resume target as part of the PTY identity and rebuild the
   // terminal session when it changes.
-  const resumeParam = searchParams.get("resume");
   // Profile-scoped chat: spawn the PTY under the globally selected
   // management profile. Changing it remounts the terminal (key below /
   // effect dep) so the user explicitly starts a fresh scoped session.
-  const { profile: scopedProfile } = useProfileScope();
   const channel = useMemo(
-    () => generateChannelId(`${resumeParam ?? ""}\0${scopedProfile}`),
-    [resumeParam, scopedProfile],
+    () => stableChannelId(ptyIdentityScope),
+    [ptyIdentityScope, reconnectNonce],
   );
   const titleScope = `${channel}\0${reconnectNonce}`;
   const sessionTitle =
     sessionTitleState.scope === titleScope ? sessionTitleState.title : null;
+  const handoffPrompt =
+    handoffState.scope === channel ? handoffState.prompt : null;
   const handleSessionTitleChange = useCallback(
     (title: string | null) => setSessionTitleState({ scope: titleScope, title }),
     [titleScope],
+  );
+
+  useEffect(() => {
+    if (!isActive) return;
+    let cancelled = false;
+
+    const refresh = () => {
+      void api
+        .getDashboardClarify(channel)
+        .then((status) => {
+          if (!cancelled) {
+            setHandoffState({ prompt: status.pending, scope: channel });
+            setHandoffComputerUrl(status.computer_url);
+            if (!status.pending) setHandoffError(null);
+          }
+        })
+        .catch(() => {
+          // Startup, restart and radio handoff can briefly leave the PTY
+          // without an active-session file. Keep the last trusted card until
+          // the next successful poll instead of making it disappear.
+        });
+    };
+
+    refresh();
+    const timer = window.setInterval(refresh, 750);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [channel, isActive]);
+
+  const handleHandoffChoice = useCallback(
+    async (choiceIndex: number) => {
+      const prompt = handoffPrompt;
+      if (!prompt || handoffAnswering) return;
+      setHandoffAnswering(true);
+      setHandoffError(null);
+      try {
+        await api.respondDashboardClarify(
+          channel,
+          prompt.request_id,
+          choiceIndex,
+        );
+        setHandoffState((current) =>
+          current.scope === channel &&
+          current.prompt?.request_id === prompt.request_id
+            ? { prompt: null, scope: channel }
+            : current,
+        );
+        termRef.current?.focus();
+      } catch (error) {
+        setHandoffError(
+          error instanceof Error
+            ? error.message
+            : "The manager did not accept that response. Try again.",
+        );
+      } finally {
+        setHandoffAnswering(false);
+      }
+    },
+    [channel, handoffAnswering, handoffPrompt],
   );
 
   useEffect(() => {
@@ -1168,7 +1203,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // Keep-alive identity: reattach to this tab's living PTY across
       // refresh/transient drops. A forced-fresh start rotates the token so
       // the previous keep-alive PTY is not reattached (registry reaps it).
-      params.attach = ptyAttachToken(forceFresh);
+      params.attach = ptyAttachToken(ptyIdentityScope);
       // Profile-scoped chat: the PTY child gets HERMES_HOME pointed at the
       // selected profile, so the conversation runs with that profile's model,
       // skills, memory, and sessions (see web_server._resolve_chat_argv).
@@ -1555,6 +1590,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     resumeParam,
     scopedProfile,
     reconnectNonce,
+    ptyIdentityScope,
   ]);
 
   // NS-434 follow-up: attach the visualViewport keyboard-inset listeners
@@ -1874,6 +1910,16 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 {PTY_RESUME_LOADING_MESSAGE}
               </div>
             </div>
+          )}
+
+          {handoffPrompt && (
+            <DashboardHandoffCard
+              answering={handoffAnswering}
+              computerUrl={handoffComputerUrl}
+              error={handoffError}
+              onChoice={handleHandoffChoice}
+              prompt={handoffPrompt}
+            />
           )}
 
           {/* NS-504: the agent process exited (e.g. `/exit` or a new session).

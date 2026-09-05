@@ -8,10 +8,10 @@ import atexit
 import concurrent.futures
 import contextlib
 import hmac
+import hashlib
 import os
 import re
 import sys
-import tempfile
 import threading
 import urllib.request
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -297,7 +297,8 @@ def _ws_auth_ok(ws: "WebSocket") -> bool:
 
 def _resolve_chat_argv(
     resume: Optional[str] = None, sidecar_url: Optional[str] = None, profile: Optional[str] = None,
-    active_session_file: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
+    active_session_file: Optional[str] = None, gateway_channel: Optional[str] = None,
+    gateway_binding: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
     """Resolve the argv + cwd + env for the chat PTY (what ``hermes --tui`` runs).
 
     Tests monkeypatch this with a tiny fake command.  Env contract: resume goes
@@ -371,7 +372,7 @@ def _resolve_chat_argv(
 
     # Without the attach URL, gatewayClient spawns its own `tui_gateway.entry`,
     # which inherits the profile HERMES_HOME set above.
-    if profile_dir is None and (gateway_ws_url := _build_gateway_ws_url()):
+    if profile_dir is None and (gateway_ws_url := _build_gateway_ws_url(gateway_channel, gateway_binding)):
         env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
 
     return list(argv), str(cwd) if cwd else None, env
@@ -418,38 +419,53 @@ def _server_internal_ws_url(path: str, **extra_qs) -> Optional[str]:
     return f"ws://{netloc}{path}?{urllib.parse.urlencode({**auth, **extra_qs})}"
 
 
-def _build_gateway_ws_url() -> Optional[str]:
+def _build_gateway_ws_url(channel: Optional[str] = None, binding: Optional[str] = None) -> Optional[str]:
     """ws:// URL the PTY child attaches to for JSON-RPC gateway traffic."""
-    return _server_internal_ws_url("/api/ws")
+    extra = {"channel": channel, "binding": binding} if channel and binding else {}
+    return _server_internal_ws_url("/api/ws", **extra)
 
 
-def _build_sidecar_url(channel: str) -> Optional[str]:
+def _build_sidecar_url(channel: str, binding: Optional[str] = None) -> Optional[str]:
     """ws:// URL the PTY child publishes events to, or None when unbound."""
-    return _server_internal_ws_url("/api/pub", channel=channel)
+    return _server_internal_ws_url("/api/pub", channel=channel, **({"binding": binding} if binding else {}))
 
 
 async def _resolve_chat_argv_async(
     resume: Optional[str] = None, sidecar_url: Optional[str] = None, profile: Optional[str] = None,
-    active_session_file: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
+    active_session_file: Optional[str] = None, gateway_channel: Optional[str] = None,
+    gateway_binding: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
     """Resolve chat argv off the event loop (it may run ``npm run build``); the
     async lock keeps one-build-at-a-time without parking worker threads."""
     from hermes_cli.web_server import _get_chat_argv_lock, app
     kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": profile}
     if active_session_file is not None:
         kwargs["active_session_file"] = active_session_file
+    if gateway_channel is not None:
+        kwargs["gateway_channel"] = gateway_channel
+    if gateway_binding is not None:
+        kwargs["gateway_binding"] = gateway_binding
 
     async with _get_chat_argv_lock(app):
         return await asyncio.to_thread(_resolve_chat_argv, **kwargs)
 
 
 def _active_session_file_for_channel(app: "FastAPI", channel: str) -> Path:
-    """Return the per-channel file where a dashboard TUI writes its active sid."""
+    """Return the durable per-channel resume hint written by the dashboard TUI.
+
+    The file is not an authorization source; response routes use the capability-bound gateway
+    mapping.  Its only job is to recover the same canonical session after a backend restart.
+    """
     from hermes_cli.web_server import _get_pty_active_session_files
     files = _get_pty_active_session_files(app)
     if files.get(channel) is None:
-        fd, raw_path = tempfile.mkstemp(prefix="hermes-pty-active-", suffix=".json")
-        os.close(fd)
-        files[channel] = Path(raw_path)
+        from hermes_constants import get_hermes_home
+
+        root = Path(get_hermes_home()) / "run" / "dashboard-pty"
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with contextlib.suppress(OSError):
+            root.chmod(0o700)
+        digest = hashlib.sha256(channel.encode()).hexdigest()
+        files[channel] = root / f"{digest}.json"
     return files[channel]
 
 
