@@ -19,6 +19,8 @@ These tests verify:
    running as root deliberately.
 5. The main CMD path (``docker run <image> …``) is unaffected by the
    PATH-shim ordering — no recursion, no behavior change.
+6. An ad-hoc ``docker exec hermes …`` process inherits the browser executable
+   discovered by s6 at boot, matching supervised gateway behavior.
 """
 
 from __future__ import annotations
@@ -172,6 +174,53 @@ def test_main_cmd_path_unaffected(built_image: str) -> None:
     )
     assert r.returncode == 0, f"CMD path broken by shim: stderr={r.stderr!r}"
     assert "Traceback" not in r.stderr
+
+
+def test_docker_exec_inherits_discovered_browser_path(
+    sleep_container: str,
+) -> None:
+    """The shim bridges s6's runtime browser path into ad-hoc CLI sessions.
+
+    Docker exec starts with the image's static environment, while stage2 finds
+    Chromium only at container boot and writes its path to s6's envdir.  A
+    long-lived dashboard command gives the test enough time to inspect the
+    real post-shim Hermes process environment without adding a diagnostic-only
+    product command.
+    """
+    port = "19129"
+    r = subprocess.run(
+        ["docker", "exec", "-d", sleep_container,
+         "hermes", "dashboard", "--host", "127.0.0.1", "--port", port,
+         "--no-open"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert r.returncode == 0, f"dashboard launch failed: {r.stderr}"
+
+    deadline = time.monotonic() + 15
+    observed = ""
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["docker", "exec", sleep_container, "sh", "-c",
+             f"pid=$(pgrep -f 'hermes dashboard.*--port {port}' | head -n 1); "
+             "[ -n \"$pid\" ] && tr '\\0' '\\n' < /proc/$pid/environ | "
+             "grep '^AGENT_BROWSER_EXECUTABLE_PATH='"],
+            capture_output=True, text=True, timeout=5,
+        )
+        observed = r.stdout.strip()
+        if r.returncode == 0 and observed:
+            break
+        time.sleep(0.2)
+
+    assert observed.startswith("AGENT_BROWSER_EXECUTABLE_PATH=/"), (
+        "docker-exec Hermes process did not inherit the s6-discovered "
+        f"browser path (observed={observed!r})"
+    )
+    browser_path = observed.split("=", 1)[1]
+    r = subprocess.run(
+        ["docker", "exec", sleep_container, "test", "-x", browser_path],
+        capture_output=True, text=True, timeout=5,
+    )
+    assert r.returncode == 0, f"inherited browser is not executable: {browser_path}"
 
 
 def test_e2e_login_then_supervised_gateway_can_read_auth(

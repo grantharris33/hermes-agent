@@ -41,6 +41,26 @@
 set -e
 
 REAL=/opt/hermes/.venv/bin/hermes
+S6_BROWSER_ENV=/run/s6/container_environment/AGENT_BROWSER_EXECUTABLE_PATH
+
+# s6 exports boot-discovered runtime values to supervised services through its
+# envdir.  A process launched with `docker exec`, however, starts from the
+# image's static Config.Env and does not inherit that envdir.  Import only the
+# one verified browser executable that stage2 writes so operator and synthetic
+# CLI sessions get the same browser behavior as the gateway.
+inherit_s6_browser_path() {
+    [ -z "${AGENT_BROWSER_EXECUTABLE_PATH:-}" ] || return 0
+    [ -f "$S6_BROWSER_ENV" ] || return 0
+    [ ! -L "$S6_BROWSER_ENV" ] || return 0
+
+    browser_path=$(cat "$S6_BROWSER_ENV") || return 0
+    [ -n "$browser_path" ] || return 0
+    [ -x "$browser_path" ] || return 0
+    AGENT_BROWSER_EXECUTABLE_PATH=$browser_path
+    export AGENT_BROWSER_EXECUTABLE_PATH
+}
+
+inherit_s6_browser_path
 
 # Defensive: if the venv binary is missing (corrupted image, partial
 # install), fail loudly rather than silently masking it.
