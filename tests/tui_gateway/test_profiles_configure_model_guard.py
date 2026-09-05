@@ -17,6 +17,10 @@ These tests pin the same handshake contract on ``profiles.configure``:
 
 from __future__ import annotations
 
+import contextlib
+import copy
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -147,3 +151,76 @@ def test_profile_standing_instructions_reject_oversize_without_overwrite(home):
     assert rejected["applied"]["coding_instructions"] is False
     assert rejected["ok"] is False
     assert _profile_coding_instructions(home) == "keep me"
+
+
+def test_concurrent_distinct_config_sections_do_not_erase_each_other(home, monkeypatch):
+    """Two LONG_HANDLER workers must not save snapshots read before the other's write."""
+    import hermes_cli.config as config_module
+
+    state: dict = {}
+    state_guard = threading.Lock()
+    transaction_lock = threading.RLock()
+    transaction_state = threading.local()
+    unsynchronized_loads = threading.Barrier(2)
+    simultaneous_start = threading.Barrier(3)
+
+    @contextlib.contextmanager
+    def deterministic_transaction():
+        with transaction_lock:
+            transaction_state.active = True
+            try:
+                yield
+            finally:
+                transaction_state.active = False
+
+    def load_config():
+        with state_guard:
+            snapshot = copy.deepcopy(state)
+        # If the production RMW boundary is removed, force both workers to read
+        # the same stale snapshot before either can save. With the boundary,
+        # this branch is never entered and the second read sees the first save.
+        if not getattr(transaction_state, "active", False):
+            unsynchronized_loads.wait(timeout=2)
+        return snapshot
+
+    def save_config(config, **_kwargs):
+        with state_guard:
+            state.clear()
+            state.update(copy.deepcopy(config))
+
+    monkeypatch.setattr(config_module, "config_rmw_transaction", deterministic_transaction)
+    monkeypatch.setattr(config_module, "load_config", load_config)
+    monkeypatch.setattr(config_module, "save_config", save_config)
+
+    def configure(params):
+        simultaneous_start.wait(timeout=2)
+        return _configure(params)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        instructions = pool.submit(configure, {"coding_instructions": "Prefer uv for Python."})
+        toolsets = pool.submit(configure, {"enabled_toolsets": ["terminal"]})
+        simultaneous_start.wait(timeout=2)
+        results = [instructions.result(timeout=3), toolsets.result(timeout=3)]
+
+    assert all(result["ok"] for result in results)
+    assert state["agent"]["coding_instructions"] == "Prefer uv for Python."
+    assert state["tools"]["enabled_toolsets"] == ["terminal"]
+
+
+def test_real_concurrent_handlers_persist_both_distinct_sections(home):
+    simultaneous_start = threading.Barrier(3)
+
+    def configure(params):
+        simultaneous_start.wait(timeout=2)
+        return _configure(params)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        instructions = pool.submit(configure, {"coding_instructions": "Prefer uv for Python."})
+        toolsets = pool.submit(configure, {"enabled_toolsets": ["terminal"]})
+        simultaneous_start.wait(timeout=2)
+        results = [instructions.result(timeout=3), toolsets.result(timeout=3)]
+
+    persisted = yaml.safe_load((home / "config.yaml").read_text()) or {}
+    assert all(result["ok"] for result in results)
+    assert persisted["agent"]["coding_instructions"] == "Prefer uv for Python."
+    assert persisted["tools"]["enabled_toolsets"] == ["terminal"]

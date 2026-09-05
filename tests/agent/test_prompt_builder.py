@@ -475,6 +475,51 @@ class TestBuildContextFilesPrompt:
         assert "ignore previous instructions" not in result
         assert "Unsafe notes" not in result
 
+    def test_registered_project_lookup_timeout_is_bounded_and_fail_open(self, tmp_path, monkeypatch):
+        import threading
+        import time
+
+        import agent.prompt_builder as pb_mod
+        from hermes_cli import projects_db as pdb
+
+        profile_home = tmp_path / "profile"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "AGENTS.md").write_text("Repository context still loads.")
+        with pdb.connect_closing(db_path=profile_home / "projects.db") as conn:
+            pdb.create_project(conn, name="Slow mount", folders=[str(repo)], notes="Should time out.")
+
+        original_lookup = pdb.project_for_path
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def stalled_lookup(*args, **kwargs):
+            started.set()
+            release.wait(timeout=1)
+            try:
+                return original_lookup(*args, **kwargs)
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(pdb, "project_for_path", stalled_lookup)
+        monkeypatch.setattr(pb_mod, "_PROJECT_CONTEXT_LOOKUP_TIMEOUT_SECS", 0.05)
+
+        began = time.monotonic()
+        try:
+            result = pb_mod.build_context_files_prompt(
+                cwd=str(repo), skip_soul=True, home_override=profile_home,
+            )
+        finally:
+            release.set()
+        elapsed = time.monotonic() - began
+
+        assert started.is_set()
+        assert elapsed < 0.5
+        assert "Should time out" not in result
+        assert "Repository context still loads" in result
+        assert finished.wait(timeout=1)
+
     # --- AGENTS.md directory chain (port of grok-cli instructions.ts) ---
 
     def test_agents_md_chain_merges_root_to_cwd(self, tmp_path):

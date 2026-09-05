@@ -56,6 +56,13 @@ def _best_effort(fn) -> bool:
     return _try(lambda: (fn(), True)[1], False)
 
 
+def _config_rmw(fn):
+    """Run one profile-config mutation while config load/save stay serialized."""
+    transaction = _lazy("hermes_cli.config", "config_rmw_transaction")
+    with transaction():
+        return fn()
+
+
 @contextlib.contextmanager
 def _hermes_home_scope(path):
     """Scope config/auth resolution to ``path`` for the block."""
@@ -598,6 +605,32 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
                 load_config() or {}, params["enabled_mcp_servers"], launch_mcp, save_config))
 
 
+def _configure_profile_config(profile_dir, params, applied):
+    """Apply every config.yaml section from one request in one RMW transaction."""
+    model, provider = _model_provider_params(params)
+    has_lists = any(
+        isinstance(params.get(key), list)
+        for key in ("disabled_skills", "enabled_toolsets", "enabled_mcp_servers")
+    )
+    has_config = (
+        isinstance(params.get("coding_instructions"), str)
+        or bool(model and provider)
+        or has_lists
+    )
+    if not has_config:
+        return None
+
+    def apply():
+        confirm_message = _configure_model(profile_dir, params, applied)
+        if isinstance(params.get("coding_instructions"), str):
+            _configure_coding_instructions(profile_dir, params["coding_instructions"], applied)
+        if has_lists:
+            _configure_cfg_sections(profile_dir, params, applied)
+        return confirm_message
+
+    return _config_rmw(apply)
+
+
 @_profile_handler("profiles.configure", 5064)
 def _(rid, params: dict) -> dict:
     """Editor Save: ``name`` plus any of ``ui_meta`` (+ ``ui_meta_expected_revisions``), ``soul``,
@@ -616,11 +649,7 @@ def _(rid, params: dict) -> dict:
         write_meta = _lazy("hermes_cli.profiles", "write_profile_meta")
         applied["description"] = _best_effort(lambda: write_meta(
             profile_dir, description=params["description"].strip(), description_auto=False))
-    confirm_message = _configure_model(profile_dir, params, applied)
-    if isinstance(params.get("coding_instructions"), str):
-        _configure_coding_instructions(profile_dir, params["coding_instructions"], applied)
-    if any(isinstance(params.get(k), list) for k in ("disabled_skills", "enabled_toolsets", "enabled_mcp_servers")):
-        _configure_cfg_sections(profile_dir, params, applied)
+    confirm_message = _configure_profile_config(profile_dir, params, applied)
     # confirm_* is the shape config.set returns, so clients reuse one confirm handler.
     return _ok(rid, {"ok": all(applied.values()) if applied else True, "applied": applied,
                      **({"confirm_required": True, "confirm_message": confirm_message}

@@ -1,6 +1,7 @@
 """Configuration management for Hermes Agent: config.yaml / .env loading, saving,
 validation, migration, and the ``hermes config`` command."""
 
+import contextlib
 import copy
 import difflib
 import json
@@ -197,6 +198,21 @@ def validate_env_var_name_for_write(key: str) -> None:
 # (approval, browser, setup flows) load/save config concurrently during long agent runs.
 # RLock because save_config internally calls read_raw_config.
 _CONFIG_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def config_rmw_transaction():
+    """Serialize one in-process config read-modify-write sequence.
+
+    ``load_config`` and ``save_config`` each take this re-entrant lock, but
+    callers that release it between the read and write can still overwrite a
+    concurrent section update with their stale snapshot. Mutation surfaces
+    that may run concurrently hold this boundary across their complete RMW.
+    """
+    with _CONFIG_LOCK:
+        yield
+
+
 # path -> last successfully loaded (expanded) config; served after a parse failure so a
 # mid-edit broken YAML never silently drops user overrides (e.g. approvals.deny rules).
 _LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}

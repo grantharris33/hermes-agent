@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 # NFS) can fault-in an evicted file and block a cold read indefinitely, which
 # stalls system-prompt assembly before the first turn.
 _CONTEXT_FILE_READ_TIMEOUT_SECS = 5.0
+# Project ownership scans may canonicalize every registered folder. A stale
+# network mount must not consume the full context-file allowance on first turn.
+_PROJECT_CONTEXT_LOOKUP_TIMEOUT_SECS = 0.5
 
 
 def _get_context_file_read_timeout() -> float:
@@ -1569,12 +1572,34 @@ def _load_registered_project_context(
     """
     home = Path(home_override) if home_override is not None else get_hermes_home()
     db_path = home / "projects.db"
-    if not db_path.is_file():
-        return ""
+    result: "queue.Queue[tuple[bool, object]]" = queue.Queue(maxsize=1)
+
+    def lookup() -> None:
+        try:
+            if not db_path.is_file():
+                result.put((True, None))
+                return
+            from hermes_cli import projects_db as pdb
+            with pdb.connect_readonly_closing(db_path=db_path) as conn:
+                result.put((True, pdb.project_for_path(conn, str(cwd_path))))
+        except Exception as exc:
+            result.put((False, exc))
+
+    threading.Thread(
+        target=lookup, daemon=True, name="project-context-lookup",
+    ).start()
     try:
-        from hermes_cli import projects_db as pdb
-        with pdb.connect_readonly_closing(db_path=db_path) as conn:
-            project = pdb.project_for_path(conn, str(cwd_path))
+        timeout = min(_PROJECT_CONTEXT_LOOKUP_TIMEOUT_SECS, _get_context_file_read_timeout())
+        ok, value = result.get(timeout=timeout)
+        if not ok:
+            raise value  # type: ignore[misc]
+        project = value
+    except queue.Empty:
+        logger.warning(
+            "Registered project lookup for %s timed out after %.1fs; skipping",
+            cwd_path, timeout,
+        )
+        return ""
     except Exception:
         logger.debug("registered project context unavailable for %s", cwd_path, exc_info=True)
         return ""

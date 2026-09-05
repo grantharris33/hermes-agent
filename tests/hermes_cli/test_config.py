@@ -12,6 +12,7 @@ from hermes_cli.config import (
     DEFAULT_CONFIG,
     InvalidUserConfigError,
     check_config_version,
+    config_rmw_transaction,
     get_hermes_home,
     ensure_hermes_home,
     get_compatible_custom_providers,
@@ -286,6 +287,16 @@ class TestSaveAndLoadRoundtrip:
             saved = yaml.safe_load((tmp_path / "config.yaml").read_text())
             assert saved["agent"]["max_turns"] == 42
             assert "max_turns" not in saved
+
+    def test_config_rmw_transaction_allows_nested_real_load_and_save(self, tmp_path):
+        """The transaction lock is re-entrant around the production I/O paths."""
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            with config_rmw_transaction():
+                config = load_config()
+                config["agent"]["coding_instructions"] = "Prefer uv."
+                save_config(config)
+
+            assert load_config()["agent"]["coding_instructions"] == "Prefer uv."
 
     def test_save_config_refuses_to_overwrite_unreadable_existing_config(self, tmp_path):
         config_path = tmp_path / "config.yaml"
