@@ -388,8 +388,10 @@ def test_coding_instructions_load_from_agent_profile_without_context_override(mo
 
     launch_home = tmp_path / "launch"
     bot_home = tmp_path / "profiles" / "manager"
+    managed_home = tmp_path / "managed"
     launch_home.mkdir(parents=True)
     bot_home.mkdir(parents=True)
+    managed_home.mkdir()
     (launch_home / "config.yaml").write_text(
         "agent:\n  coding_context: on\n  coding_instructions: LAUNCH-ONLY\n",
         encoding="utf-8",
@@ -398,7 +400,12 @@ def test_coding_instructions_load_from_agent_profile_without_context_override(mo
         "agent:\n  coding_context: on\n  coding_instructions: BOT-ONLY\n",
         encoding="utf-8",
     )
+    (managed_home / "config.yaml").write_text(
+        "agent:\n  managed_coding_instructions: MANAGED-ALL\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("HERMES_HOME", str(launch_home))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_home))
     assert get_hermes_home_override() is None
     before = {
         path.relative_to(bot_home): path.read_bytes()
@@ -420,7 +427,7 @@ def test_coding_instructions_load_from_agent_profile_without_context_override(mo
     ):
         prompt = build_system_prompt(agent, system_message="SYSTEM_MESSAGE")
 
-    assert "Operator instructions (from config):\nBOT-ONLY" in prompt
+    assert "Operator instructions (from config):\nMANAGED-ALL\nBOT-ONLY" in prompt
     assert "LAUNCH-ONLY" not in prompt
     assert get_hermes_home_override() is None
     after = {

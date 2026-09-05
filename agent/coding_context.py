@@ -306,13 +306,25 @@ def normalize_coding_instructions(raw: Any) -> str:
     text = "\n".join(str(item).strip() for item in items if str(item).strip())
     return text[:CODING_INSTRUCTIONS_MAX_CHARS]
 
+
+def _combined_coding_instructions(config: Optional[dict[str, Any]]) -> str:
+    """Deployment-wide managed rules followed by profile-specific additions."""
+    managed = normalize_coding_instructions(
+        _agent_config_value(config, "managed_coding_instructions", "", readonly=False)
+    )
+    profile = normalize_coding_instructions(
+        _agent_config_value(config, "coding_instructions", "", readonly=False)
+    )
+    return normalize_coding_instructions([managed, profile])
+
+
 @dataclass(frozen=True)
 class RuntimeMode:
     """The resolved operating posture for a session; immutable, built once via
     :func:`resolve_runtime_mode` and never re-resolved mid-session (prompt cache).
     ``config_mode``: normalized ``agent.coding_context`` (toolset collapse gated on
     ``focus``); ``model``: steers edit-format guidance only; ``instructions``:
-    ``agent.coding_instructions``."""
+    bounded managed deployment rules followed by ``agent.coding_instructions``."""
 
     profile: ContextProfile
     surface: str
@@ -378,18 +390,17 @@ def resolve_runtime_mode(
 ) -> RuntimeMode:
     """Resolve the operating posture once (a handful of ``stat`` calls) — the single entry
     point every domain should call; the result is safe to hold for the session. ``model``
-    only steers edit-format guidance; ``agent.coding_instructions`` (str or list) becomes
-    the trailing block so a user can pin workflow rules without editing the shipped brief."""
+    only steers edit-format guidance; deployment-managed and profile coding instructions
+    become one bounded trailing block so operators can layer universal and bot-specific rules."""
     resolved_cwd = _resolve_cwd(cwd)
     mode = _coding_mode(config)
-    raw = _agent_config_value(config, "coding_instructions", "", readonly=False)
     return RuntimeMode(
         profile=_detect_profile(mode, (platform or "").strip().lower(), resolved_cwd),
         surface=platform or "",
         cwd=resolved_cwd,
         config_mode=mode,
         model=model,
-        instructions=normalize_coding_instructions(raw),
+        instructions=_combined_coding_instructions(config),
     )
 
 

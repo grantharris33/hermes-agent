@@ -1125,10 +1125,13 @@ agent:
   verify_on_stop: false        # true | false | "auto" (surface-aware: on for CLI/TUI/desktop, off for messaging)
   verify_guidance: true        # Append creative-UI / clean-diff guidance to the missing-evidence nudge
   max_verify_nudges: 3         # Cap on consecutive continue nudges per turn (built-in + pre_verify hooks)
+  managed_coding_instructions: "" # Deployment-wide rules; normally pinned in managed scope
   coding_instructions: ""      # Profile-wide coding defaults; frozen into new coding sessions
 ```
 
 `agent.coding_instructions` is a profile/bot-wide default for coding sessions. The Bots advanced editor exposes the same field. It accepts a string (legacy list values still load), is capped at 16,000 characters, and is frozen with the rest of the system prompt for normal turns. Start a new session after changing it; a sanctioned prompt rebuild such as context compression may refresh it.
+
+`agent.managed_coding_instructions` is the deployment-wide layer for rules that must apply to every profile. Administrators should pin it in the root-owned [Managed Scope](/user-guide/managed-scope), rather than a profile file. Hermes places the managed layer first, then appends the profile's `coding_instructions`, and caps the combined block at 16,000 characters. This keeps universal policy separate from bot-specific additions.
 
 For example, a profile can carry environment-tool preferences everywhere it codes:
 

@@ -34,14 +34,15 @@ The Desktop new-project form keeps both meanings visible: **Idea** is saved as d
 
 The effective specificity order for coding workflow defaults is:
 
-1. Profile `agent.coding_instructions` (the bot's standing default)
-2. Registered project guidance
-3. The selected repository context file; a nested `AGENTS.md` is most specific within its directory chain
+1. Managed-scope `agent.managed_coding_instructions` (deployment-wide rules for every profile)
+2. Profile `agent.coding_instructions` (the bot's standing additions)
+3. Registered project guidance
+4. The selected repository context file; a nested `AGENTS.md` is most specific within its directory chain
 
 Project notes are deliberately absent from this instruction precedence because they are facts, not commands. Higher-priority system or user instructions always remain authoritative.
 
 :::note Discussion rules
-Discussion/group rooms do not currently define or inherit a shared standing-rules object. Put a shared default on each member profile, or register project guidance for a shared workspace. Group-level inheritance remains unsupported until it has an explicit ownership and conflict model.
+Discussion/group rooms do not currently define a room-owned standing-rules object. Use deployment-managed instructions for universal rules, a shared member profile for bot-type rules, or registered project guidance for a shared workspace. Room-level inheritance remains unsupported until it has an explicit ownership and conflict model.
 :::
 
 ## Supported Context Files

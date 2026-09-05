@@ -269,6 +269,31 @@ class TestRuntimeMode:
         assert mode.system_blocks()[-1].endswith(mode.instructions)
         assert len(cc.normalize_coding_instructions("x" * 20_000)) == cc.CODING_INSTRUCTIONS_MAX_CHARS
 
+    def test_managed_rules_precede_profile_rules_with_one_total_bound(self, tmp_path):
+        mode = cc.resolve_runtime_mode(
+            platform="tui",
+            cwd=tmp_path,
+            config={
+                "agent": {
+                    "coding_context": "on",
+                    "managed_coding_instructions": ["Prefer uv.", "Use nvm."],
+                    "coding_instructions": "Bot-specific addition.",
+                }
+            },
+        )
+
+        assert mode.instructions == "Prefer uv.\nUse nvm.\nBot-specific addition."
+        bounded = cc._combined_coding_instructions(
+            {
+                "agent": {
+                    "managed_coding_instructions": "g" * cc.CODING_INSTRUCTIONS_MAX_CHARS,
+                    "coding_instructions": "PROFILE-MUST-NOT-EXCEED-TOTAL-BOUND",
+                }
+            }
+        )
+        assert len(bounded) == cc.CODING_INSTRUCTIONS_MAX_CHARS
+        assert "PROFILE-MUST-NOT-EXCEED-TOTAL-BOUND" not in bounded
+
 
 
 # ── edit-format steering (per-model harness tuning) ──────────────────────────

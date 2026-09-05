@@ -119,6 +119,10 @@ model:
   provider: nous
 security:
   redact_secrets: true
+agent:
+  managed_coding_instructions: |
+    Prefer uv for Python environments and dependency management.
+    Use nvm for Node.js version selection, honoring the project-pinned version.
 YAML
 
 # Optionally pin a shared, non-sensitive env value

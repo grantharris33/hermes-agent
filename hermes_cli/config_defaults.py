@@ -166,6 +166,9 @@ DEFAULT_CONFIG = {
         # stable system block — profile-wide workflow defaults, e.g. "Prefer uv for Python and nvm
         # for Node." Cache-safe: takes effect next session.
         "coding_instructions": "",
+        # Deployment-wide coding rules prepended before each profile's own instructions. Intended
+        # for a root-owned managed-scope config (/etc/hermes/config.yaml), not the profile editor.
+        "managed_coding_instructions": "",
         # When verify-on-stop finds edits without fresh verification evidence, add guidance for
         # creative UI work (no broad tsc/lint/test before visual approval) and clean-diff
         # expectations. false = keep the evidence nudge terse.
