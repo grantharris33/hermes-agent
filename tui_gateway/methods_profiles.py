@@ -397,6 +397,26 @@ def _describe_toolsets(cfg):
     return toolsets_out, pinned_set
 
 
+def _describe_mcp_servers(cfg) -> list:
+    """Best-effort MCP rows for the profile editor."""
+    mcp_cfg = cfg.get("mcp_servers")
+    if not isinstance(mcp_cfg, dict):
+        return []
+    return _try(lambda: [
+        {"name": str(srv_name), "enabled": not is_truthy_value(entry.get("disabled", False)),
+         "transport": str(entry.get("transport") or "http") if entry.get("url") else "stdio"}
+        for srv_name in sorted(mcp_cfg.keys()) for entry in (mcp_cfg[srv_name],)
+        if isinstance(entry, dict)
+    ], [])
+
+
+def _describe_coding_instructions(cfg) -> str:
+    """Normalized profile-wide instructions for old string/list configs."""
+    agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    normalize = _lazy("agent.coding_context", "normalize_coding_instructions")
+    return normalize(agent_cfg.get("coding_instructions", ""))
+
+
 @_profile_handler("profiles.describe", 5063)
 def _(rid, params: dict) -> dict:
     """Editor snapshot; installed skills are enabled unless in ``skills.disabled``; ``mcp_servers``
@@ -416,17 +436,12 @@ def _(rid, params: dict) -> dict:
         toolsets_out, pinned_set = _describe_toolsets(cfg)
         soul_path = profile_dir / "SOUL.md"
         soul = _try(lambda: soul_path.read_text(encoding="utf-8", errors="replace") if soul_path.is_file() else "", "")
-        mcp_cfg = cfg.get("mcp_servers")
-        mcp_out = _try(lambda: [
-            {"name": str(srv_name), "enabled": not is_truthy_value(entry.get("disabled", False)),
-             "transport": str(entry.get("transport") or "http") if entry.get("url") else "stdio"}
-            for srv_name in sorted(mcp_cfg.keys()) for entry in (mcp_cfg[srv_name],)
-            if isinstance(entry, dict)
-        ], []) if isinstance(mcp_cfg, dict) else []
+        mcp_out = _describe_mcp_servers(cfg)
         model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
         meta = _try(lambda: _lazy("hermes_cli.profiles", "read_profile_meta")(profile_dir), {})
         return _ok(rid, {
             "name": name, "description": str(meta.get("description") or ""), "soul": soul,
+            "coding_instructions": _describe_coding_instructions(cfg),
             "model": {"provider": str(model_cfg.get("provider") or ""),
                       "default": str(model_cfg.get("default") or "")},
             "skills": installed, "toolsets": toolsets_out,
@@ -532,6 +547,29 @@ def _save_mcp_toggles(cfg, enabled, launch_mcp, save_config) -> None:
     save_config(cfg)
 
 
+def _save_coding_instructions(cfg, raw, save_config) -> None:
+    """Replace the profile's bounded standing coding instructions."""
+    text = str(raw).strip()
+    max_chars = _lazy("agent.coding_context", "CODING_INSTRUCTIONS_MAX_CHARS")
+    if len(text) > max_chars:
+        raise ValueError(f"coding_instructions must be at most {max_chars} characters")
+    agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    if text:
+        agent_cfg["coding_instructions"] = text
+    else:
+        agent_cfg.pop("coding_instructions", None)
+    cfg["agent"] = agent_cfg
+    save_config(cfg)
+
+
+def _configure_coding_instructions(profile_dir, raw, applied) -> None:
+    """Persist only the profile instructions section and report its outcome."""
+    with _hermes_home_scope(profile_dir):
+        from hermes_cli.config import load_config, save_config
+        applied["coding_instructions"] = _best_effort(
+            lambda: _save_coding_instructions(load_config() or {}, raw, save_config))
+
+
 def _configure_cfg_sections(profile_dir, params, applied) -> None:
     """Apply ``disabled_skills`` / ``enabled_toolsets`` / ``enabled_mcp_servers`` (replace
     semantics; empty toolsets clears the pin). An undefined MCP server is copied from the LAUNCH
@@ -564,7 +602,8 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
 def _(rid, params: dict) -> dict:
     """Editor Save: ``name`` plus any of ``ui_meta`` (+ ``ui_meta_expected_revisions``), ``soul``,
     ``description``, ``model`` + ``provider`` (+ ``confirm_expensive_model``), ``disabled_skills``,
-    ``enabled_toolsets``, ``enabled_mcp_servers``; sections are independent, ``applied`` reports each."""
+    ``enabled_toolsets``, ``enabled_mcp_servers``, ``coding_instructions``; sections are independent,
+    ``applied`` reports each. Standing instructions are profile-wide and affect new prompt builds."""
     _name, profile_dir, err = _resolve_profile(rid, params)
     if err is not None:
         return err
@@ -578,6 +617,8 @@ def _(rid, params: dict) -> dict:
         applied["description"] = _best_effort(lambda: write_meta(
             profile_dir, description=params["description"].strip(), description_auto=False))
     confirm_message = _configure_model(profile_dir, params, applied)
+    if isinstance(params.get("coding_instructions"), str):
+        _configure_coding_instructions(profile_dir, params["coding_instructions"], applied)
     if any(isinstance(params.get(k), list) for k in ("disabled_skills", "enabled_toolsets", "enabled_mcp_servers")):
         _configure_cfg_sections(profile_dir, params, applied)
     # confirm_* is the shape config.set returns, so clients reuse one confirm handler.

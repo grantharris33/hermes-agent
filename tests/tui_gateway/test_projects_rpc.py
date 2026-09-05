@@ -210,8 +210,19 @@ def test_tree_build_warms_every_path_it_will_resolve(monkeypatch, tmp_path):
 
 
 def test_create_list_roundtrip(tmp_path):
-    created = _call("projects.create", {"name": "Demo", "folders": [str(tmp_path)], "use": True})
+    created = _call("projects.create", {
+        "name": "Demo", "folders": [str(tmp_path)], "use": True,
+        "notes": "The backend owns durable truth.", "guidance": "Use uv for Python.",
+    })
     assert created["project"]["slug"] == "demo"
+    assert created["project"]["notes"] == "The backend owns durable truth."
+    assert created["project"]["guidance"] == "Use uv for Python."
+
+    updated = _call("projects.update", {
+        "id": created["project"]["id"], "notes": "New fact.", "guidance": "",
+    })
+    assert updated["project"]["notes"] == "New fact."
+    assert updated["project"]["guidance"] is None
 
     listing = _call("projects.list")
     assert [p["slug"] for p in listing["projects"]] == ["demo"]
@@ -883,5 +894,4 @@ def test_projects_without_a_profile_stay_on_the_launch_home(monkeypatch, tmp_pat
     assert _cached_repo_labels(launch_home) == ["only"]
     assert not (coder_home / "projects.db").exists()
     assert not (Path(os.environ["HERMES_HOME"]) / "projects.db").exists()
-
 

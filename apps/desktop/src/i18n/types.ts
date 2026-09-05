@@ -2008,6 +2008,8 @@ export interface Translations {
       ideaGenerate: string
       ideaGenerating: string
       ideaShuffle: string
+      guidanceLabel: string
+      guidancePlaceholder: string
       noFolders: string
       addFolder: string
       primaryBadge: string

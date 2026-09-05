@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS projects (
     color         TEXT,
     board_slug    TEXT,
     primary_path  TEXT,
+    notes         TEXT,
+    guidance      TEXT,
     created_at    INTEGER NOT NULL,
     archived      INTEGER NOT NULL DEFAULT 0
 );
@@ -74,11 +76,17 @@ _BRANCH_SAFE_RE = re.compile(r"[^a-z0-9._-]+")
 _INITIALIZED_PATHS: set[str] = set()
 # TEXT columns added to `projects` after v1; re-applied idempotently on every open so a legacy DB
 # upgrades in place.
-_OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color")
+_OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color", "notes", "guidance")
 # Nullable TEXT columns that may be absent from a legacy row.
-_OPTIONAL_ROW_FIELDS = ("description", "icon", "color", "board_slug", "primary_path")
+_OPTIONAL_ROW_FIELDS = ("description", "icon", "color", "board_slug", "primary_path", "notes", "guidance")
 _ACTIVE_META_KEY = "active_id"
 _DISCOVERY_POLICY_META_KEY = "repo_discovery_policy"
+# These values enter the session prompt. Bound them at the authoritative write
+# seam as well as at prompt assembly so a single project row cannot grow without
+# limit. The two fields have separate budgets because notes and instructions are
+# intentionally separate trust/meaning domains.
+PROJECT_NOTES_MAX_CHARS = 16_000
+PROJECT_GUIDANCE_MAX_CHARS = 16_000
 
 
 def _slugify(name: str) -> str:
@@ -140,6 +148,31 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     return conn
 
 
+def connect_readonly(db_path: Optional[Path] = None) -> sqlite3.Connection:
+    """Open an existing projects DB read-only without creating or migrating it.
+
+    Prompt assembly uses this path: reading session context must not create
+    ``projects.db`` or unexpectedly turn a schema migration into startup work.
+    The short timeout also keeps a busy DB from stalling the first model turn.
+    """
+    path = db_path if db_path is not None else projects_db_path()
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.25)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    return conn
+
+
+@contextlib.contextmanager
+def connect_readonly_closing(db_path: Optional[Path] = None):
+    """Close the read-only connection on every prompt-build path."""
+    conn = connect_readonly(db_path=db_path)
+    try:
+        yield conn
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
 @contextlib.contextmanager
 def connect_closing(db_path: Optional[Path] = None):
     """Open a projects DB connection and close it on exit (sqlite3's own context manager only
@@ -174,6 +207,8 @@ class Project:
     color: Optional[str] = None
     board_slug: Optional[str] = None
     primary_path: Optional[str] = None
+    notes: Optional[str] = None
+    guidance: Optional[str] = None
     archived: bool = False
     folders: List[ProjectFolder] = field(default_factory=list)
 
@@ -207,8 +242,18 @@ def _unique_slug(conn: sqlite3.Connection, candidate: str) -> str:
 
 
 def _primary_path_key(path: str) -> str:
-    """Comparison key for primary-path dedup (absolute + case/sep-normalized)."""
-    return os.path.normcase(_normalize_path(path))
+    """Canonical comparison key for ownership/dedup, including symlink aliases."""
+    return os.path.normcase(os.path.realpath(_normalize_path(path)))
+
+
+def _bounded_project_text(value: Optional[str], field_name: str, max_chars: int) -> Optional[str]:
+    """Normalize one prompt-bearing project field; blank clears, oversize rejects."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if len(text) > max_chars:
+        raise ValueError(f"project {field_name} must be at most {max_chars} characters")
+    return text or None
 
 
 def find_by_primary_path(conn: sqlite3.Connection, path: str, *, include_archived: bool = False) -> Optional[Project]:
@@ -227,7 +272,8 @@ def find_by_primary_path(conn: sqlite3.Connection, path: str, *, include_archive
 def create_project(
     conn: sqlite3.Connection, *, name: str, slug: Optional[str] = None, folders: Optional[Iterable[str]] = None,
     primary_path: Optional[str] = None, description: Optional[str] = None, icon: Optional[str] = None,
-    color: Optional[str] = None, board_slug: Optional[str] = None, allow_duplicate_path: bool = False,
+    color: Optional[str] = None, board_slug: Optional[str] = None, notes: Optional[str] = None,
+    guidance: Optional[str] = None, allow_duplicate_path: bool = False,
 ) -> str:
     """Create a project and return its id. ``folders`` are normalized to absolute paths; ``primary_path``
     is added to the folder set (if absent) and marked primary, else the first folder becomes primary."""
@@ -249,12 +295,14 @@ def create_project(
             f"folder already belongs to project '{existing.slug}' ({existing.id}); "
             "switch to it instead of creating a duplicate"
         )
+    notes = _bounded_project_text(notes, "notes", PROJECT_NOTES_MAX_CHARS)
+    guidance = _bounded_project_text(guidance, "guidance", PROJECT_GUIDANCE_MAX_CHARS)
     with write_txn(conn):
         conn.execute(
-            "INSERT INTO projects (id, slug, name, description, icon, color, board_slug,  primary_path, created_at, archived) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            "INSERT INTO projects (id, slug, name, description, icon, color, board_slug, primary_path, "
+            "notes, guidance, created_at, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
             (pid, _unique_slug(conn, slug_candidate), name, description, icon, color,
-             normalize_slug(board_slug) if board_slug else None, primary, now),
+             normalize_slug(board_slug) if board_slug else None, primary, notes, guidance, now),
         )
         conn.executemany(
             "INSERT INTO project_folders (project_id, path, label, is_primary, added_at) VALUES (?, ?, ?, ?, ?)",
@@ -280,20 +328,27 @@ def get_project(conn: sqlite3.Connection, id_or_slug: str) -> Optional[Project]:
 def update_project(
     conn: sqlite3.Connection, project_id: str, *, name: Optional[str] = None, description: Optional[str] = None,
     icon: Optional[str] = None, color: Optional[str] = None, board_slug: Optional[str] = None,
+    notes: Optional[str] = None, guidance: Optional[str] = None,
 ) -> bool:
-    """Patch top-level project fields; only provided (non-None) fields change. ``icon``, ``color`` and
-    ``board_slug`` take ``""`` to clear (store NULL) — ``None`` leaves the field untouched."""
+    """Patch top-level project fields; only provided (non-None) fields change.
+
+    ``icon``, ``color``, ``board_slug``, ``notes`` and ``guidance`` take ``""``
+    to clear (store NULL); ``None`` leaves the field untouched.
+    """
     if name is not None:
         name = str(name).strip()
         if not name:
             raise ValueError("project name must not be empty")
     if board_slug is not None:
         board_slug = normalize_slug(board_slug) if board_slug.strip() else ""
-    # (column, provided value, stored value) — "" clears icon/color/board_slug to NULL.
+    stored_notes = _bounded_project_text(notes, "notes", PROJECT_NOTES_MAX_CHARS)
+    stored_guidance = _bounded_project_text(guidance, "guidance", PROJECT_GUIDANCE_MAX_CHARS)
+    # (column, provided value, stored value) — "" clears nullable fields to NULL.
     fields = [
         (col, given, stored) for col, given, stored in (
             ("name", name, name), ("description", description, description), ("icon", icon, icon or None),
             ("color", color, color or None), ("board_slug", board_slug, board_slug or None),
+            ("notes", notes, stored_notes), ("guidance", guidance, stored_guidance),
         ) if given is not None
     ]
     if not fields:
@@ -471,17 +526,18 @@ def project_for_path(conn: sqlite3.Connection, path: str, *, include_archived: b
     folder wins so nested projects resolve to the innermost one."""
     if not str(path or "").strip():
         return None
-    target = _normalize_path(path)
+    target = _primary_path_key(path)
     sql = "SELECT pf.project_id AS pid, pf.path AS folder FROM project_folders pf JOIN projects p ON p.id = pf.project_id"
     if not include_archived:
         sql += " WHERE p.archived = 0"
 
-    def owns(folder: str) -> bool:
-        stem = folder.rstrip("/\\")
-        return target == folder or target.startswith(stem + os.sep) or target.startswith(stem + "/")
+    def ownership_key(folder: str) -> Optional[str]:
+        canonical = _primary_path_key(folder)
+        stem = canonical.rstrip("/\\")
+        return canonical if target == canonical or target.startswith(stem + os.sep) or target.startswith(stem + "/") else None
 
-    owners = [row for row in conn.execute(sql).fetchall() if owns(row["folder"])]
-    return get_project(conn, max(owners, key=lambda r: len(r["folder"]))["pid"]) if owners else None
+    owners = [(row, key) for row in conn.execute(sql).fetchall() if (key := ownership_key(row["folder"]))]
+    return get_project(conn, max(owners, key=lambda item: len(item[1]))[0]["pid"]) if owners else None
 
 
 def branch_name_for(project: Project, task_id: str, *, title: str = "") -> str:

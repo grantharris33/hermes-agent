@@ -105,6 +105,40 @@ beforeEach(() => {
   respondWith(() => ({}))
 })
 
+describe('profile standing instructions', () => {
+  it('writes the trimmed instructions as their own dirty section', async () => {
+    respondWith(() => ({ applied: { coding_instructions: true }, ok: true }))
+
+    const result = await applyAdvancedConfig(bot, {
+      ...emptyAdvancedState(),
+      dirtyInstructions: true,
+      instructions: '  Prefer uv for Python. Use nvm for Node.  ',
+      loaded: true
+    })
+
+    expect(routed).toEqual([
+      {
+        method: 'profiles.configure',
+        params: { coding_instructions: 'Prefer uv for Python. Use nvm for Node.', name: 'zeta' }
+      }
+    ])
+    expect(result).toMatchObject({ applied: { coding_instructions: true }, ok: true })
+  })
+
+  it('sends a blank value to clear the profile default', async () => {
+    respondWith(() => ({ applied: { coding_instructions: true }, ok: true }))
+
+    await applyAdvancedConfig(bot, {
+      ...emptyAdvancedState(),
+      dirtyInstructions: true,
+      instructions: '   ',
+      loaded: true
+    })
+
+    expect(routed[0].params).toEqual({ coding_instructions: '', name: 'zeta' })
+  })
+})
+
 describe('selecting Inherit', () => {
   it('clears the profile model assignment through the CLI', async () => {
     respondWith(() => ({ blocked: false, code: 0, output: 'Unset model' }))

@@ -421,10 +421,23 @@ describe('createProject', () => {
 
     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
 
-    const result = await createProject({ folders: ['/srv/demo'], name: 'Demo', use: true })
+    const result = await createProject({
+      folders: ['/srv/demo'],
+      guidance: 'Run the narrow repository tests.',
+      idea: 'Desktop and mobile share one API.',
+      name: 'Demo',
+      use: true
+    })
 
     expect(result).toEqual(created)
-    expect(request).toHaveBeenCalledWith('projects.create', expect.objectContaining({ name: 'Demo' }))
+    expect(request).toHaveBeenCalledWith(
+      'projects.create',
+      expect.objectContaining({
+        guidance: 'Run the narrow repository tests.',
+        name: 'Demo',
+        notes: 'Desktop and mobile share one API.'
+      })
+    )
     expect($sidebarAgentsGrouped.get()).toBe(true)
     expect($activeProjectId.get()).toBe('p_new')
   })

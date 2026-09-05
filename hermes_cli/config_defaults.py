@@ -163,8 +163,8 @@ DEFAULT_CONFIG = {
         # categories to names-only (explicit opt-in); "on" = force everywhere; "off" = disable.
         "coding_context": "auto",
         # Standing operator instructions (string or list) appended to the coding brief as an extra
-        # stable system block — project-wide workflow rules, e.g. "Don't run tsc/lint until I
-        # approve." Cache-safe: takes effect next session.
+        # stable system block — profile-wide workflow defaults, e.g. "Prefer uv for Python and nvm
+        # for Node." Cache-safe: takes effect next session.
         "coding_instructions": "",
         # When verify-on-stop finds edits without fresh verification evidence, add guidance for
         # creative UI work (no broad tsc/lint/test before visual approval) and clean-diff

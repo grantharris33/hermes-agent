@@ -754,8 +754,12 @@ export interface CreateProjectInput {
   icon?: string
   color?: string
   boardSlug?: string
+  /** Durable profile-local reference context. Defaults to `idea` on create. */
+  notes?: string
+  /** Durable executable instructions for this project. */
+  guidance?: string
   use?: boolean
-  // Free-text project idea; written to IDEA.md at the primary folder on create.
+  // Free-text project idea; persisted as project notes and written to IDEA.md.
   idea?: string
   /** Where a "New project" DRAG dropped the project (tab-strip slot / pane
    *  edge / pane center). The completion side opens the created project's
@@ -874,6 +878,8 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
         icon: input.icon,
         color: input.color,
         board_slug: input.boardSlug,
+        notes: input.notes ?? input.idea,
+        guidance: input.guidance,
         use: input.use ?? false
       })
     )
@@ -938,7 +944,13 @@ export async function renameProject(id: string, name: string): Promise<void> {
 // lag; only a failed write reconciles from the server.
 export async function updateProject(
   id: string,
-  patch: { name?: string; color?: null | string; icon?: null | string }
+  patch: {
+    name?: string
+    color?: null | string
+    icon?: null | string
+    notes?: null | string
+    guidance?: null | string
+  }
 ): Promise<void> {
   const snap = snapshotProjects()
 
@@ -957,7 +969,7 @@ export async function updateProject(
   $projects.set(snap.projects.map(proj => (proj.id === id ? { ...proj, ...patch } : proj)))
 
   // Backend treats null/undefined as "leave unchanged"; "" clears (stores NULL).
-  // Map explicit null → "" so "no color"/"no icon" actually clear.
+  // Map explicit null → "" so nullable fields actually clear.
   await persistOrRollback(snap, () =>
     gatewayRequest(
       'projects.update',
@@ -965,7 +977,9 @@ export async function updateProject(
         id,
         ...patch,
         ...(patch.color === null && { color: '' }),
-        ...(patch.icon === null && { icon: '' })
+        ...(patch.icon === null && { icon: '' }),
+        ...(patch.notes === null && { notes: '' }),
+        ...(patch.guidance === null && { guidance: '' })
       })
     )
   )

@@ -95,6 +95,7 @@ export function CheckList({ items, onToggle, columns = 2 }: CheckListProps) {
 
 /** `profiles.describe` as the advanced editor reads it. */
 export interface ProfileDescribeResponse {
+  coding_instructions?: string
   mcp_servers?: CapabilityEntry[]
   model?: { default?: string; provider?: string }
   skills?: CapabilityEntry[]
@@ -108,12 +109,14 @@ export interface McpCatalogResponse {
 /** Staged advanced-config edits. Each `dirty*` flag gates one section of the
  *  `profiles.configure` payload, so an untouched section is never written. */
 interface AdvancedConfigState {
+  dirtyInstructions: boolean
   dirtyMcp: boolean
   dirtyModel: boolean
   dirtySkills: boolean
   dirtySoul: boolean
   dirtyToolsets: boolean
   loaded: boolean
+  instructions: string
   mcp: CapabilityEntry[]
   model: string
   provider: string
@@ -125,6 +128,25 @@ interface AdvancedProfileConfigProps {
   bot: RosterRow
   setState: (update: (prev: AdvancedConfigState) => AdvancedConfigState) => void
   state: AdvancedConfigState
+}
+
+function StandingInstructionsField({ state, setState }: Pick<AdvancedProfileConfigProps, 'setState' | 'state'>) {
+  return labeled(
+    'Standing coding instructions (profile-wide · new sessions)',
+    <Textarea
+      className="min-h-24 font-mono text-xs leading-5"
+      maxLength={16_000}
+      onChange={event =>
+        setState(prev => ({
+          ...prev,
+          dirtyInstructions: true,
+          instructions: event.target.value
+        }))
+      }
+      placeholder="Prefer uv for Python environments and dependencies. Use nvm for Node version selection."
+      value={state.instructions}
+    />
+  )
 }
 
 export function AdvancedProfileConfig({ bot, state, setState }: AdvancedProfileConfigProps) {
@@ -158,6 +180,7 @@ export function AdvancedProfileConfig({ bot, state, setState }: AdvancedProfileC
           ...prev,
           provider: res.model?.provider || '',
           model: res.model?.default || '',
+          instructions: res.coding_instructions || '',
           soul: res.soul || '',
           skills: res.skills || [],
           toolsets: res.toolsets || [],
@@ -286,6 +309,7 @@ export function AdvancedProfileConfig({ bot, state, setState }: AdvancedProfileC
             />
           </ResizableFrame>
         )}
+        <StandingInstructionsField setState={setState} state={state} />
         {labeled(
           'SOUL.md (persona + agent-messaging protocol)',
           <Textarea
@@ -322,8 +346,10 @@ export function AdvancedProfileConfig({ bot, state, setState }: AdvancedProfileC
           }}
         />
         <div className="rounded-md border border-(--ui-stroke-secondary) px-3 py-2 text-xs text-(--ui-text-tertiary)">
-          Remote capabilities require a newer desktop. Model and SOUL changes remain staged until you save.
+          Remote capabilities require a newer desktop. Model, instructions and SOUL changes remain staged until you
+          save.
         </div>
+        <StandingInstructionsField setState={setState} state={state} />
         {labeled(
           'SOUL.md (persona + agent-messaging protocol)',
           <Textarea
@@ -488,6 +514,7 @@ export function AdvancedProfileConfig({ bot, state, setState }: AdvancedProfileC
           )}
         </div>
       )}
+      <StandingInstructionsField setState={setState} state={state} />
       {labeled(
         'SOUL.md (persona + agent-messaging protocol)',
         <Textarea
@@ -511,11 +538,13 @@ export function emptyAdvancedState(): AdvancedConfigState {
     loaded: false,
     provider: '',
     model: '',
+    instructions: '',
     soul: '',
     skills: [],
     toolsets: [],
     mcp: [],
     dirtyModel: false,
+    dirtyInstructions: false,
     dirtySoul: false,
     dirtySkills: false,
     dirtyToolsets: false,
@@ -528,6 +557,7 @@ export function emptyAdvancedState(): AdvancedConfigState {
  *  `requestForBot`, whose params are a `Record<string, unknown>`, and only
  *  aliases pick up the implicit index signature that requires. */
 export type ProfileConfigurePayload = {
+  coding_instructions?: string
   disabled_skills?: string[]
   enabled_mcp_servers?: string[]
   enabled_toolsets?: string[]
@@ -551,6 +581,10 @@ export async function applyAdvancedConfig(bot: RosterRow, state: AdvancedConfigS
   }
 
   const applied: Record<string, boolean> = {}
+
+  if (state.dirtyInstructions) {
+    payload.coding_instructions = state.instructions.trim()
+  }
 
   if (state.dirtySoul) {
     payload.soul = ensureMessagingProtocol(state.soul, bot.name, $lastRoster.get())

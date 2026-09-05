@@ -252,6 +252,23 @@ class TestRuntimeMode:
         mode = cc.resolve_runtime_mode(platform="cli", cwd=tmp_path, config={"agent": {"coding_context": "on"}})
         assert not any("Operator instructions" in b for b in mode.system_blocks())
 
+    def test_profile_instructions_preserve_list_compatibility_and_are_bounded(self, tmp_path):
+        _git_init(tmp_path)
+        mode = cc.resolve_runtime_mode(
+            platform="cli",
+            cwd=tmp_path,
+            config={
+                "agent": {
+                    "coding_context": "on",
+                    "coding_instructions": ["Prefer uv for Python.", "Use nvm for Node."],
+                }
+            },
+        )
+
+        assert mode.instructions == "Prefer uv for Python.\nUse nvm for Node."
+        assert mode.system_blocks()[-1].endswith(mode.instructions)
+        assert len(cc.normalize_coding_instructions("x" * 20_000)) == cc.CODING_INSTRUCTIONS_MAX_CHARS
+
 
 
 # ── edit-format steering (per-model harness tuning) ──────────────────────────

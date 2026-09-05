@@ -29,6 +29,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_create.add_argument("--primary", default=None, metavar="PATH", help="Primary repo path")
     for opt in ("--description", "--icon", "--color"):
         p_create.add_argument(opt, default=None)
+    p_create.add_argument("--notes", default=None, help="Durable reference context (not executable instructions)")
+    p_create.add_argument("--guidance", default=None, help="Durable project instructions loaded for new sessions")
     p_create.add_argument("--board", default=None, metavar="SLUG", help="Bind a kanban board")
     p_create.add_argument("--use", action="store_true", help="Set as the active project")
     p_list = sub.add_parser("list", aliases=["ls"], help="List projects")
@@ -46,6 +48,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_add.add_argument("--primary", action="store_true", help="Mark as primary repo")
     project_sub("remove-folder", "Remove a folder from a project").add_argument("path", help="Folder path")
     project_sub("rename", "Rename a project").add_argument("name", help="New name")
+    project_sub("set-notes", "Replace durable project notes (empty string clears)").add_argument(
+        "text", help="Reference context; not treated as instructions")
+    project_sub("set-guidance", "Replace executable project guidance (empty string clears)").add_argument(
+        "text", help="Instructions for sessions working in this project")
     project_sub("set-primary", "Set the primary folder").add_argument("path", help="Folder path (must already be in project)")
     p_use = sub.add_parser("use", help="Set the active project")
     p_use.add_argument("project", nargs="?", default=None, help="Project id or slug (omit to clear)")
@@ -124,6 +130,10 @@ def _print_project(proj) -> None:
     for label, value in (("about", proj.description), ("board", proj.board_slug), ("primary", proj.primary_path)):
         if value:
             print(f"  {label}:{' ' * (8 - len(label))}{value}")
+    for label, value in (("notes", proj.notes), ("guidance", proj.guidance)):
+        if value:
+            indented = "\n".join(f"    {line}" for line in value.splitlines())
+            print(f"  {label}:\n{indented}")
     if proj.folders:
         print("  folders:")
         for f in proj.folders:
@@ -135,6 +145,7 @@ def _cmd_create(args, conn) -> int:
     pid = pdb.create_project(
         conn, name=args.name, slug=args.slug, folders=args.folders, primary_path=args.primary,
         description=args.description, icon=args.icon, color=args.color, board_slug=args.board,
+        notes=args.notes, guidance=args.guidance,
     )
     if args.use:
         pdb.set_active(conn, pid)
@@ -182,6 +193,17 @@ def _cmd_remove_folder(args, conn, proj):
 def _cmd_rename(args, conn, proj) -> str:
     pdb.update_project(conn, proj.id, name=args.name)
     return f"Renamed {proj.slug} -> {args.name}"
+
+
+def _project_text_command(field: str, label: str):
+    """Replace one prompt-bearing project text field, with an empty string clearing it."""
+    @_with_project
+    def handler(args, conn, proj):
+        pdb.update_project(conn, proj.id, **{field: args.text})
+        action = "Updated" if args.text.strip() else "Cleared"
+        return f"{action} {label} for {proj.slug}"
+
+    return handler
 
 
 @_with_project
@@ -233,6 +255,8 @@ _HANDLERS = {
     "add-folder": _cmd_add_folder,
     "remove-folder": _cmd_remove_folder,
     "rename": _cmd_rename,
+    "set-notes": _project_text_command("notes", "notes"),
+    "set-guidance": _project_text_command("guidance", "guidance"),
     "set-primary": _cmd_set_primary,
     "use": _cmd_use,
     "archive": _flag_command("archive_project", "Archived"),

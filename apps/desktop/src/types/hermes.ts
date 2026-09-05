@@ -1019,6 +1019,10 @@ export interface ProjectInfo {
   color: null | string
   board_slug: null | string
   primary_path: null | string
+  /** Durable background facts; explicitly non-executable in the prompt. */
+  notes?: null | string
+  /** Executable project instructions, below repository context in precedence. */
+  guidance?: null | string
   archived: boolean
   created_at: number
   folders: ProjectFolder[]

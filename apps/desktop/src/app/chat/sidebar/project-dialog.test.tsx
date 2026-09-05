@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type * as Nanostores from 'nanostores'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ProjectDialog } from './project-dialog'
 
@@ -23,6 +23,8 @@ vi.mock('@/i18n', () => ({
           ideaLabel: 'Idea',
           ideaPlaceholder: 'What are you building?',
           ideaShuffle: 'Shuffle ideas',
+          guidanceLabel: 'Project guidance',
+          guidancePlaceholder: 'Instructions for this project',
           namePlaceholder: 'Project name',
           noFolders: 'No folders yet',
           primaryBadge: 'Primary',
@@ -72,6 +74,12 @@ vi.mock('@/lib/project-idea-templates', () => ({
 
 const tipTrigger = (el: HTMLElement) => el.closest('[data-slot="tooltip-trigger"]')
 
+beforeEach(() => {
+  vi.clearAllMocks()
+  $newProjectDropPlacement.set(null)
+  $projectDialog.set({ mode: 'create' })
+})
+
 // Fill the create form and click Create once the form is actually submittable
 // (creation requires a name + at least one folder, so the button stays
 // disabled until both are in). Awaiting the enable also keeps an async submit
@@ -88,6 +96,26 @@ async function fillCreateForm() {
 }
 
 describe('ProjectDialog', () => {
+  it('keeps durable notes and executable guidance distinct on create', async () => {
+    const { createProject } = vi.mocked(await import('@/store/projects'))
+
+    vi.mocked(createProject).mockClear()
+    render(<ProjectDialog />)
+    fireEvent.change(screen.getByPlaceholderText('What are you building?'), {
+      target: { value: 'Desktop and mobile share one API.' }
+    })
+    fireEvent.change(screen.getByPlaceholderText('Instructions for this project'), {
+      target: { value: 'Use the narrow repository test commands.' }
+    })
+    await fillCreateForm()
+    await waitFor(() => expect(createProject).toHaveBeenCalledOnce())
+
+    expect(createProject.mock.calls[0]?.[0]).toMatchObject({
+      guidance: 'Use the narrow repository test commands.',
+      idea: 'Desktop and mobile share one API.'
+    })
+  })
+
   it('wraps the "shuffle idea" button in a Tip', () => {
     render(<ProjectDialog />)
 

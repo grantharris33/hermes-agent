@@ -292,6 +292,20 @@ def _enabled_mcp_servers(config: Optional[dict[str, Any]]) -> list[str]:
 
 # ── RuntimeMode (the seam) ──────────────────────────────────────────────────
 
+CODING_INSTRUCTIONS_MAX_CHARS = 16_000
+
+
+def normalize_coding_instructions(raw: Any) -> str:
+    """Normalize profile standing instructions defensively for prompt use.
+
+    Config historically accepted a string or list. The editor writes one
+    string, while this reader preserves list compatibility and caps legacy or
+    hand-edited values so prompt growth remains bounded.
+    """
+    items = raw if isinstance(raw, (list, tuple)) else [raw or ""]
+    text = "\n".join(str(item).strip() for item in items if str(item).strip())
+    return text[:CODING_INSTRUCTIONS_MAX_CHARS]
+
 @dataclass(frozen=True)
 class RuntimeMode:
     """The resolved operating posture for a session; immutable, built once via
@@ -369,15 +383,13 @@ def resolve_runtime_mode(
     resolved_cwd = _resolve_cwd(cwd)
     mode = _coding_mode(config)
     raw = _agent_config_value(config, "coding_instructions", "", readonly=False)
-    items = raw if isinstance(raw, (list, tuple)) else [raw or ""]
-    instructions = "\n".join(str(item).strip() for item in items if str(item).strip())
     return RuntimeMode(
         profile=_detect_profile(mode, (platform or "").strip().lower(), resolved_cwd),
         surface=platform or "",
         cwd=resolved_cwd,
         config_mode=mode,
         model=model,
-        instructions=instructions,
+        instructions=normalize_coding_instructions(raw),
     )
 
 

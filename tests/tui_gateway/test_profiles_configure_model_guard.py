@@ -64,6 +64,18 @@ def _profile_model(home: Path):
     return model_cfg.get("default")
 
 
+def _profile_coding_instructions(home: Path):
+    cfg_path = home / "config.yaml"
+    if not cfg_path.is_file():
+        return None
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    return (cfg.get("agent") or {}).get("coding_instructions")
+
+
+def _describe():
+    return srv._methods["profiles.describe"]("describe", {"name": "default"})["result"]
+
+
 def test_guarded_model_answers_confirm_required_and_writes_nothing(home, contributor_guard):
     result = _configure({"model": GUARDED_MODEL, "provider": "opencode-go"})
 
@@ -109,3 +121,29 @@ def test_other_sections_still_apply_while_model_awaits_confirmation(home, contri
     assert result.get("confirm_required") is True
     assert result["applied"].get("soul") is True
     assert _profile_model(home) != GUARDED_MODEL
+
+
+def test_profile_standing_instructions_roundtrip_and_clear(home):
+    instructions = "Prefer uv for Python environments and dependencies. Use nvm for Node version selection."
+
+    result = _configure({"coding_instructions": instructions})
+
+    assert result["applied"]["coding_instructions"] is True
+    assert _profile_coding_instructions(home) == instructions
+    assert _describe()["coding_instructions"] == instructions
+
+    cleared = _configure({"coding_instructions": "  "})
+    assert cleared["applied"]["coding_instructions"] is True
+    assert _profile_coding_instructions(home) is None
+    assert _describe()["coding_instructions"] == ""
+
+
+def test_profile_standing_instructions_reject_oversize_without_overwrite(home):
+    from agent.coding_context import CODING_INSTRUCTIONS_MAX_CHARS
+
+    assert _configure({"coding_instructions": "keep me"})["applied"]["coding_instructions"] is True
+    rejected = _configure({"coding_instructions": "x" * (CODING_INSTRUCTIONS_MAX_CHARS + 1)})
+
+    assert rejected["applied"]["coding_instructions"] is False
+    assert rejected["ok"] is False
+    assert _profile_coding_instructions(home) == "keep me"

@@ -107,12 +107,14 @@ const localBot: RosterRow = {
 }
 
 const advancedState: {
+  dirtyInstructions: boolean
   dirtyMcp: boolean
   dirtyModel: boolean
   dirtySkills: boolean
   dirtySoul: boolean
   dirtyToolsets: boolean
   loaded: boolean
+  instructions: string
   mcp: CapabilityEntry[]
   model: string
   provider: string
@@ -120,12 +122,14 @@ const advancedState: {
   soul: string
   toolsets: CapabilityEntry[]
 } = {
+  dirtyInstructions: false,
   dirtyMcp: false,
   dirtyModel: false,
   dirtySkills: false,
   dirtySoul: false,
   dirtyToolsets: false,
   loaded: true,
+  instructions: '',
   mcp: [{ enabled: false, fromCatalog: true, installed: false, name: 'remote-mcp', requires: ['TOKEN'] }],
   model: '',
   provider: '',

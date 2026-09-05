@@ -45,6 +45,7 @@ export function ProjectDialog() {
   const [name, setName] = useState('')
   const [folders, setFolders] = useState<string[]>([])
   const [idea, setIdea] = useState('')
+  const [guidance, setGuidance] = useState('')
   const [templates, setTemplates] = useState<ProjectIdeaTemplate[]>([])
   const [generatingIdea, setGeneratingIdea] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -71,6 +72,7 @@ export function ProjectDialog() {
       setName(state?.name ?? '')
       setFolders([])
       setIdea('')
+      setGuidance('')
       setTemplates(randomIdeaTemplates())
       setGeneratingIdea(false)
       setSubmitting(false)
@@ -151,7 +153,15 @@ export function ProjectDialog() {
       // create leaves the dialog open for a retry that still lands where it
       // was dropped; the open-state effect discards it on cancel/teardown.
       await runSubmit(
-        () => createProject({ dropPlacement, folders, idea: idea.trim() || undefined, name: trimmed, use: true }),
+        () =>
+          createProject({
+            dropPlacement,
+            folders,
+            guidance: guidance.trim() || undefined,
+            idea: idea.trim() || undefined,
+            name: trimmed,
+            use: true
+          }),
         clearNewProjectDropPlacement
       )
     }
@@ -264,6 +274,7 @@ export function ProjectDialog() {
               <Textarea
                 className="min-h-20 pr-8 text-[0.8125rem]"
                 disabled={submitting}
+                maxLength={16_000}
                 onChange={event => setIdea(event.target.value)}
                 placeholder={p.ideaPlaceholder}
                 value={idea}
@@ -304,6 +315,20 @@ export function ProjectDialog() {
                 </Button>
               </Tip>
             </div>
+          </div>
+        )}
+
+        {mode === 'create' && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[0.6875rem] font-medium text-(--ui-text-tertiary)">{p.guidanceLabel}</span>
+            <Textarea
+              className="min-h-20 font-mono text-[0.8125rem]"
+              disabled={submitting}
+              maxLength={16_000}
+              onChange={event => setGuidance(event.target.value)}
+              placeholder={p.guidancePlaceholder}
+              value={guidance}
+            />
           </div>
         )}
 

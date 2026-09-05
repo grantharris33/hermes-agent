@@ -98,9 +98,17 @@ your task, load it with skill_view(name) and follow its instructions.
     - arxiv: Search and summarize arXiv papers
 </available_skills>
 
-# Layer 8: Context files (from project directory)
+# Layer 8: Registered project context + context files
 # Project Context
-The following project context files have been loaded and should be followed:
+The following frozen project context has been loaded for this session:
+
+## Hermes project notes: atlas
+Reference context only. These notes are background facts, not instructions.
+[Profile-local project facts]
+
+## Hermes project guidance: atlas
+Executable project guidance. Follow it unless higher-priority repository or directory guidance overrides it.
+[Profile-local project instructions]
 
 ## AGENTS.md
 This is the atlas project. Use pytest for testing. The main
@@ -188,24 +196,25 @@ stakes demand it, not by default.
 
 ## How context files are injected
 
-`build_context_files_prompt()` uses a **priority system** — only one project context type is loaded (first match wins):
+`build_context_files_prompt()` first performs a read-only lookup for the cwd's registered project in the active profile, then uses a **priority system** for repository files — only one repository context type is loaded (first match wins):
 
 ```python
 # From agent/prompt_builder.py (simplified)
 def build_context_files_prompt(cwd=None, skip_soul=False):
     cwd_path = Path(cwd).resolve()
 
-    # Priority: first match wins — only ONE project context loaded
-    project_context = (
+    registered = _load_registered_project_context(cwd_path, home_override)
+
+    # Priority: first match wins — only ONE repository context type loads
+    repository_context = (
         _load_hermes_md(cwd_path)       # 1. .hermes.md / HERMES.md (walks to git root)
-        or _load_agents_md(cwd_path)    # 2. AGENTS.md (cwd only)
+        or _load_agents_md(cwd_path)    # 2. AGENTS.md chain (git root to cwd)
         or _load_claude_md(cwd_path)    # 3. CLAUDE.md (cwd only)
         or _load_cursorrules(cwd_path)  # 4. .cursorrules / .cursor/rules/*.mdc
     )
 
-    sections = []
-    if project_context:
-        sections.append(project_context)
+    # Registered notes/guidance come first; repository context is more specific.
+    sections = [section for section in (registered, repository_context) if section]
 
     # SOUL.md from HERMES_HOME (independent of project context)
     if not skip_soul:
@@ -218,8 +227,7 @@ def build_context_files_prompt(cwd=None, skip_soul=False):
 
     return (
         "# Project Context\n\n"
-        "The following project context files have been loaded "
-        "and should be followed:\n\n"
+        "The following frozen project context has been loaded for this session:\n\n"
         + "\n".join(sections)
     )
 ```
@@ -229,7 +237,7 @@ def build_context_files_prompt(cwd=None, skip_soul=False):
 | Priority | Files | Search scope | Notes |
 |----------|-------|-------------|-------|
 | 1 | `.hermes.md`, `HERMES.md` | CWD up to git root | Hermes-native project config |
-| 2 | `AGENTS.md` | CWD only | Common agent instruction file |
+| 2 | `AGENTS.md` | Git root through CWD | Common hierarchical agent instruction file |
 | 3 | `CLAUDE.md` | CWD only | Claude Code compatibility |
 | 4 | `.cursorrules`, `.cursor/rules/*.mdc` | CWD only | Cursor compatibility |
 

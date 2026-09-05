@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
 import pytest
 
@@ -39,7 +40,13 @@ def test_discovery_policy_change_clears_only_discovered_rows(conn):
 
 
 def test_create_get_list(conn):
-    pid = pdb.create_project(conn, name="Hermes Agent", folders=["/tmp/hermes"])
+    pid = pdb.create_project(
+        conn,
+        name="Hermes Agent",
+        folders=["/tmp/hermes"],
+        notes="The staging API is shared with mobile.",
+        guidance="Use uv for this Python workspace.",
+    )
     proj = pdb.get_project(conn, pid)
 
     assert proj is not None
@@ -49,10 +56,62 @@ def test_create_get_list(conn):
     assert proj.primary_path == "/tmp/hermes"
     assert [f.path for f in proj.folders] == ["/tmp/hermes"]
     assert proj.folders[0].is_primary is True
+    assert proj.notes == "The staging API is shared with mobile."
+    assert proj.guidance == "Use uv for this Python workspace."
 
     # Lookup by slug too.
     assert pdb.get_project(conn, "hermes-agent").id == pid
     assert len(pdb.list_projects(conn)) == 1
+
+    assert pdb.update_project(conn, pid, notes="Updated fact.", guidance="") is True
+    updated = pdb.get_project(conn, pid)
+    assert updated.notes == "Updated fact."
+    assert updated.guidance is None
+
+
+def test_prompt_bearing_fields_are_bounded_without_partial_write(conn):
+    too_long = "x" * (pdb.PROJECT_GUIDANCE_MAX_CHARS + 1)
+
+    with pytest.raises(ValueError, match="guidance must be at most"):
+        pdb.create_project(conn, name="Oversize", guidance=too_long)
+    assert pdb.list_projects(conn) == []
+
+    pid = pdb.create_project(conn, name="Bounded", notes="original")
+    with pytest.raises(ValueError, match="notes must be at most"):
+        pdb.update_project(conn, pid, notes="x" * (pdb.PROJECT_NOTES_MAX_CHARS + 1))
+    assert pdb.get_project(conn, pid).notes == "original"
+
+
+def test_legacy_projects_db_migrates_notes_and_guidance(tmp_path):
+    db_path = tmp_path / "legacy-projects.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(
+        """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+            description TEXT, icon TEXT, color TEXT, board_slug TEXT, primary_path TEXT,
+            created_at INTEGER NOT NULL, archived INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE project_folders (
+            project_id TEXT NOT NULL, path TEXT NOT NULL, label TEXT,
+            is_primary INTEGER NOT NULL DEFAULT 0, added_at INTEGER NOT NULL,
+            PRIMARY KEY (project_id, path)
+        );
+        INSERT INTO projects (id, slug, name, created_at, archived)
+        VALUES ('p_old', 'old', 'Old project', 1, 0);
+        """
+    )
+    legacy.commit()
+    legacy.close()
+    pdb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    with pdb.connect_closing(db_path=db_path) as migrated:
+        columns = {row["name"] for row in migrated.execute("PRAGMA table_info(projects)")}
+        project = pdb.get_project(migrated, "p_old")
+
+    assert {"notes", "guidance"} <= columns
+    assert project.notes is None
+    assert project.guidance is None
 
 
 
@@ -121,6 +180,22 @@ def test_find_by_primary_path(conn):
     assert pdb.find_by_primary_path(conn, "") is None
 
 
+def test_project_for_path_resolves_symlink_aliases(conn, tmp_path):
+    real = tmp_path / "real-workspace"
+    nested = real / "src"
+    nested.mkdir(parents=True)
+    alias = tmp_path / "workspace-alias"
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    pid = pdb.create_project(conn, name="Alias", folders=[str(alias)])
+
+    assert pdb.project_for_path(conn, str(nested)).id == pid
+    assert pdb.find_by_primary_path(conn, str(real)).id == pid
+
+
 
 
 
@@ -142,5 +217,3 @@ def test_per_profile_isolation(tmp_path):
     finally:
         a.close()
         b.close()
-
-

@@ -1125,8 +1125,21 @@ agent:
   verify_on_stop: false        # true | false | "auto" (surface-aware: on for CLI/TUI/desktop, off for messaging)
   verify_guidance: true        # Append creative-UI / clean-diff guidance to the missing-evidence nudge
   max_verify_nudges: 3         # Cap on consecutive continue nudges per turn (built-in + pre_verify hooks)
-  coding_instructions: ""      # Standing project-wide coding rules appended to the coding brief
+  coding_instructions: ""      # Profile-wide coding defaults; frozen into new coding sessions
 ```
+
+`agent.coding_instructions` is a profile/bot-wide default for coding sessions. The Bots advanced editor exposes the same field. It accepts a string (legacy list values still load), is capped at 16,000 characters, and is frozen with the rest of the system prompt for normal turns. Start a new session after changing it; a sanctioned prompt rebuild such as context compression may refresh it.
+
+For example, a profile can carry environment-tool preferences everywhere it codes:
+
+```yaml
+agent:
+  coding_instructions: |
+    Prefer uv for Python environments and dependencies.
+    Use nvm for Node version selection.
+```
+
+A registered project's executable guidance can refine that default for one workspace, and repository `.hermes.md`/`AGENTS.md` guidance is more specific still. Store background facts in project **notes**, not in executable guidance. See [Context Files](/user-guide/features/context-files#registered-project-notes-and-guidance).
 
 `verify_on_stop` accepts `true` (on everywhere), `false` (off — the default), or `"auto"` (legacy surface-aware behavior: on for interactive coding surfaces — CLI, TUI, desktop — and programmatic callers; off for messaging surfaces like Telegram/Discord where the verification narrative reads as chat noise). Off is the default everywhere: fresh installs ship `false` and the config migration turned it off on existing installs, so enabling it is an explicit opt-in. The `HERMES_VERIFY_ON_STOP` env var overrides the config value when set.
 
@@ -2682,12 +2695,14 @@ agent:
   clarify_timeout: 3600        # Seconds to wait for user clarification response (0 or less = unlimited)
 ```
 
-## Context Files (SOUL.md, AGENTS.md)
+## Context Files and Registered Project Context
 
 Hermes uses two different context scopes:
 
 | File | Purpose | Scope |
 |------|---------|-------|
+| Project notes | Durable reference facts, explicitly not instructions | Owning project in the active profile's `projects.db` |
+| Project guidance | Durable executable workspace instructions | Owning project in the active profile's `projects.db` |
 | `SOUL.md` | **Primary agent identity** — defines who the agent is (slot #1 in the system prompt) | `~/.hermes/SOUL.md` or `$HERMES_HOME/SOUL.md` |
 | `.hermes.md` / `HERMES.md` | Project-specific instructions (highest priority) | Walks to git root |
 | `AGENTS.md` | Project-specific instructions, coding conventions | Recursive directory walk |
@@ -2697,7 +2712,8 @@ Hermes uses two different context scopes:
 
 - **SOUL.md** is the agent's primary identity. It occupies slot #1 in the system prompt, completely replacing the built-in default identity. Edit it to fully customize who the agent is.
 - If SOUL.md is missing, empty, or cannot be loaded, Hermes falls back to a built-in default identity.
-- **Project context files use a priority system** — only ONE type is loaded (first match wins): `.hermes.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`. SOUL.md is always loaded independently.
+- Registered project notes/guidance load independently when the working directory belongs to a project in the active profile.
+- **Repository context files use a priority system** — only ONE type is loaded (first match wins): `.hermes.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`. SOUL.md is always loaded independently.
 - **AGENTS.md** is hierarchical: if subdirectories also have AGENTS.md, all are combined.
 - Hermes automatically seeds a default `SOUL.md` if one does not already exist.
 - All loaded context files are capped at `context_file_max_chars` characters (default 20,000) with smart truncation.

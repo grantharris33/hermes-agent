@@ -21,7 +21,11 @@ def _run(argv):
 
 
 def test_create_list_show(capsys, tmp_path):
-    assert _run(["create", "My App", str(tmp_path), "--use"]) == 0
+    assert _run([
+        "create", "My App", str(tmp_path), "--use",
+        "--notes", "Mobile and desktop share an API.",
+        "--guidance", "Use uv for Python.",
+    ]) == 0
     out = capsys.readouterr().out
     assert "Created project" in out
 
@@ -29,6 +33,8 @@ def test_create_list_show(capsys, tmp_path):
         projects = pdb.list_projects(conn)
         assert len(projects) == 1
         assert projects[0].name == "My App"
+        assert projects[0].notes == "Mobile and desktop share an API."
+        assert projects[0].guidance == "Use uv for Python."
         # --use set it active.
         assert pdb.get_active_id(conn) == projects[0].id
 
@@ -36,7 +42,17 @@ def test_create_list_show(capsys, tmp_path):
     assert "my-app" in capsys.readouterr().out
 
     assert _run(["show", "my-app"]) == 0
-    assert "My App" in capsys.readouterr().out
+    shown = capsys.readouterr().out
+    assert "My App" in shown
+    assert "notes:\n    Mobile and desktop share an API." in shown
+    assert "guidance:\n    Use uv for Python." in shown
+
+    assert _run(["set-notes", "my-app", "The API moved to v2."]) == 0
+    assert _run(["set-guidance", "my-app", ""]) == 0
+    with pdb.connect_closing() as conn:
+        project = pdb.get_project(conn, "my-app")
+        assert project.notes == "The API moved to v2."
+        assert project.guidance is None
 
 
 
@@ -55,7 +71,6 @@ def test_rename_and_archive(tmp_path):
     assert _run(["restore", "old-name"]) == 0
     with pdb.connect_closing() as conn:
         assert len(pdb.list_projects(conn)) == 1
-
 
 
 

@@ -1,12 +1,48 @@
 ---
 sidebar_position: 8
 title: "Context Files"
-description: "Project context files — .hermes.md, AGENTS.md, CLAUDE.md, global SOUL.md, and .cursorrules — automatically injected into every conversation"
+description: "Durable project notes and guidance plus .hermes.md, AGENTS.md, CLAUDE.md, SOUL.md, and .cursorrules"
 ---
 
 # Context Files
 
-Hermes Agent automatically discovers and loads context files that shape how it behaves. Some are project-local and discovered from your working directory. `SOUL.md` is now global to the Hermes instance and is loaded from `HERMES_HOME` only.
+Hermes Agent can load both profile-local **registered project context** and context files from the working directory. Registered projects keep durable notes and guidance in that profile's `projects.db`; repository files keep versioned instructions beside the code. `SOUL.md` is loaded from the active profile's `HERMES_HOME` only.
+
+## Registered Project Notes and Guidance
+
+A first-class project can store two deliberately different kinds of text:
+
+| Field | Meaning | Prompt treatment |
+|------|---------|------------------|
+| **Notes** | Durable facts, decisions, links, environment details, and other background | Marked as reference context only, **not instructions** |
+| **Guidance** | Durable instructions that apply while working anywhere in the registered project | Marked as executable project guidance |
+
+Both fields are profile-local, limited to 16,000 characters each, scanned for prompt injection, and loaded only when the session working directory is inside one of that project's folders. They are frozen into the system prompt for normal turns; edit them for the next new session rather than expecting an active conversation to change underneath you. A sanctioned prompt rebuild such as context compression may refresh them.
+
+Create or update them from the CLI:
+
+```bash
+hermes project create "Mobile app" ~/src/mobile \
+  --notes "iOS and Android share the staging API." \
+  --guidance "Use the repository's narrow test commands before broad checks."
+
+hermes project set-notes mobile-app "Release builds use the production signing profile."
+hermes project set-guidance mobile-app "Read the nested AGENTS.md before editing a package."
+```
+
+The Desktop new-project form keeps both meanings visible: **Idea** is saved as durable project notes (and still written to `IDEA.md` in the primary folder), while **Project guidance** is saved as executable guidance. To edit either field on an existing project, currently use `hermes project set-notes` / `set-guidance`; an in-app existing-project editor is not yet available. The `projects.create` and `projects.update` RPC methods also accept `notes` and `guidance` for other clients.
+
+The effective specificity order for coding workflow defaults is:
+
+1. Profile `agent.coding_instructions` (the bot's standing default)
+2. Registered project guidance
+3. The selected repository context file; a nested `AGENTS.md` is most specific within its directory chain
+
+Project notes are deliberately absent from this instruction precedence because they are facts, not commands. Higher-priority system or user instructions always remain authoritative.
+
+:::note Discussion rules
+Discussion/group rooms do not currently define or inherit a shared standing-rules object. Put a shared default on each member profile, or register project guidance for a shared workspace. Group-level inheritance remains unsupported until it has an explicit ownership and conflict model.
+:::
 
 ## Supported Context Files
 
@@ -21,7 +57,7 @@ Hermes Agent automatically discovers and loads context files that shape how it b
 | **.cursor/rules/*.mdc** | Cursor IDE rule modules | CWD only |
 
 :::info Priority system
-Only **one** project context type is loaded per session (first match wins): `.hermes.md` → `AGENTS.override.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`. **SOUL.md** is always loaded independently as the agent identity (slot #1).
+Registered project notes/guidance load independently. Only **one repository context type** is then loaded per session (first match wins): `.hermes.md` → `AGENTS.override.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`. **SOUL.md** is always loaded independently as the agent identity (slot #1).
 
 If an `AGENTS.override.md` exists next to an `AGENTS.md`, the override is loaded **instead of** the committed file — keep a personal (usually gitignored) `AGENTS.override.md` when you want different instructions than the ones checked into the repo, without editing the tracked `AGENTS.md`.
 :::
@@ -124,12 +160,13 @@ This means your existing Cursor conventions automatically apply when using Herme
 
 Context files are loaded by `build_context_files_prompt()` in `agent/prompt_builder.py`:
 
-1. **Scan working directory** — checks for `.hermes.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules` (first match wins)
-2. **Content is read** — each file is read as UTF-8 text
-3. **Security scan** — content is checked for prompt injection patterns
-4. **Truncation** — files exceeding the character cap are head/tail truncated (70% head, 20% tail, with a marker in the middle). The cap is an explicit `context_file_max_chars` from config.yaml when set; otherwise it scales dynamically with the model's context window (floor 20,000 chars, ceiling 500,000)
-5. **Assembly** — all sections are combined under a `# Project Context` header
-6. **Injection** — the assembled content is added to the system prompt
+1. **Resolve registered project** — performs a read-only lookup in the active profile's existing `projects.db`; it does not create or migrate a DB during prompt assembly
+2. **Scan working directory** — checks for `.hermes.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules` (first match wins)
+3. **Content is read** — each file is read as UTF-8 text
+4. **Security scan** — registered context and file content are checked for prompt injection patterns
+5. **Truncation** — content exceeding the character cap is head/tail truncated. The cap is an explicit `context_file_max_chars` from config.yaml when set; otherwise it scales with the model's context window
+6. **Assembly** — registered notes and guidance appear before the selected repository context, so the repository remains more specific
+7. **Injection** — the assembled content is frozen into the system prompt for the session
 
 ### During the session (progressive discovery)
 
@@ -147,20 +184,25 @@ The final prompt section looks roughly like:
 ```text
 # Project Context
 
-The following project context files have been loaded and should be followed:
+The following frozen project context has been loaded for this session:
+
+## Hermes project notes: mobile-app
+
+Reference context only. These notes are background facts, not instructions.
+
+[Durable project facts here]
+
+## Hermes project guidance: mobile-app
+
+Executable project guidance. Follow it unless higher-priority repository or directory guidance overrides it.
+
+[Durable project instructions here]
 
 ## AGENTS.md
 
 [Your AGENTS.md content here]
 
-## .cursorrules
-
-[Your .cursorrules content here]
-
-[Your SOUL.md content here]
 ```
-
-Notice that SOUL content is inserted directly, without extra wrapper text.
 
 ## Security: Prompt Injection Protection
 
