@@ -315,6 +315,13 @@ def _dashboard_clarify_terminal_receipt(session: dict, request_id: str, payload:
 
 def _dashboard_clarify_reexpose_retry(session: dict, request_id: str, reason: str) -> bool:
     """Make a failed continuation visible again without exposing internal exception text."""
+    marker = _dashboard_clarify_read(session) or {}
+    latest_turn = {}
+    if marker.get("status") == "admitted":
+        latest_turn = {
+            "turn_marker_key": marker.get("recovery_turn_marker_key"),
+            "turn_generation": marker.get("recovery_turn_generation"),
+        }
     return _dashboard_clarify_set_status(
         session,
         request_id,
@@ -322,6 +329,7 @@ def _dashboard_clarify_reexpose_retry(session: dict, request_id: str, reason: st
         recovery_lost_at=time.time(),
         recovery_lost_reason=reason,
         retry_message=_DASHBOARD_CLARIFY_RETRY_MESSAGE,
+        **latest_turn,
     )
 
 
@@ -460,11 +468,13 @@ def dashboard_clarify_generic_recovery_callbacks(session: dict) -> dict:
 
 def dashboard_clarify_abandon_generic_recovery(session: dict, reason: str) -> None:
     """Make a non-admitted generic recovery visible/actionable; never claim it completed."""
+    expected_request_id = str(session.pop("_dashboard_clarify_generic_recovery", "") or "")
+    session.pop("_dashboard_clarify_generic_turn_key", None)
     marker = _dashboard_clarify_read(session)
     if marker is None or marker.get("status") != "admitted":
         return
     request_id = str(marker.get("request_id") or "")
-    if request_id:
+    if request_id and (not expected_request_id or request_id == expected_request_id):
         _dashboard_clarify_reexpose_retry(session, request_id, reason)
 
 

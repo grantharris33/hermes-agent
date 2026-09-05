@@ -183,6 +183,74 @@ def test_recovery_build_failure_reexposes_exact_actionable_card(handoff, monkeyp
     assert "synthetic" not in public["retry_message"]
 
 
+def test_admitted_generic_recovery_build_failure_reexposes_exact_card(handoff, monkeypatch):
+    server, _db, sid = handoff
+    _record(server, sid)
+    session = server._sessions[sid]
+    session["running"] = False
+    assert server._dashboard_clarify_set_status(
+        session, "clarify-1", "admitted", answer="Continue",
+        recovery_turn_marker_key="recovery-marker",
+        recovery_turn_generation="recovery-generation",
+    )
+
+    class InlineThread:
+        def __init__(self, target=None, args=(), **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(server.threading, "Thread", InlineThread)
+    monkeypatch.setattr(
+        server,
+        "read_turn_marker",
+        lambda _home, key: (
+            {"prompt": "recovered prompt", "started_at": time.time(), "attempts": 0}
+            if key == "recovery-marker" else None
+        ),
+    )
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args: None)
+    monkeypatch.setattr(
+        server, "_wait_agent", lambda *_args, **_kwargs: {"error": {"message": "build failed"}},
+    )
+
+    result = server._maybe_schedule_auto_continue(sid, session, "rotated-owner")
+
+    assert result["attempt"] == 1
+    marker = server._dashboard_clarify_read(session)
+    assert marker["status"] == "pending"
+    assert marker["request_id"] == "clarify-1"
+    assert marker["recovery_lost_reason"] == "agent_build_failed"
+    assert marker["turn_marker_key"] == "recovery-marker"
+    assert server.dashboard_clarify_pending_for_sid(sid)["retry_message"]
+
+
+def test_admitted_generic_recovery_dispatch_refusal_reexposes_exact_card(handoff, monkeypatch):
+    server, _db, sid = handoff
+    _record(server, sid)
+    session = server._sessions[sid]
+    assert server._dashboard_clarify_set_status(
+        session, "clarify-1", "admitted", answer="Continue",
+        recovery_turn_marker_key="recovery-marker",
+        recovery_turn_generation="recovery-generation",
+    )
+    session["_dashboard_clarify_generic_recovery"] = "clarify-1"
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda *_args, **_kwargs: False)
+
+    server._dispatch_auto_continue("auto-rid", sid, session, "resume safely")
+
+    marker = server._dashboard_clarify_read(session)
+    assert marker["status"] == "pending"
+    assert marker["request_id"] == "clarify-1"
+    assert marker["recovery_lost_reason"] == "dispatch_refused"
+    assert marker["turn_marker_key"] == "recovery-marker"
+    assert server.dashboard_clarify_pending_for_sid(sid)["retry_message"]
+
+
 def test_admitted_recovery_defers_to_generic_crash_marker(handoff, monkeypatch):
     """Crash after admission must not schedule a second human-answer continuation."""
     server, _db, sid = handoff

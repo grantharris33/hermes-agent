@@ -54,6 +54,70 @@ def _auto_continue_note(prompt: str) -> str:
             f"finish the task. The interrupted request was:]\n\n{prompt}")
 
 
+def _dispatch_auto_continue(rid: str, sid: str, session: dict, text: str) -> None:
+    """Dispatch one admitted recovery and make any handoff-specific refusal actionable."""
+    try:
+        _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
+        _emit("message.start", sid)
+        handoff_kwargs = dashboard_clarify_generic_recovery_callbacks(session)
+        started = _run_prompt_submit(
+            rid, sid, session, text, display_kind="auto_continue", **handoff_kwargs,
+        )
+        if handoff_kwargs and not started:
+            dashboard_clarify_abandon_generic_recovery(session, "dispatch_refused")
+    except Exception as exc:
+        _notif_log_failure("auto-continue dispatch failed", exc)
+        dashboard_clarify_abandon_generic_recovery(session, "dispatch_failed")
+        _notif_release_turn(session)  # rebound from session_notifications
+
+
+def _auto_continue_kickoff(
+    sid: str, session: dict, session_key: str, marker: dict, attempt: int, text: str,
+) -> None:
+    """Build, lease and dispatch a scheduled recovery after the resume response is free."""
+    rid = f"__auto_continue__{int(time.time() * 1000)}"
+    try:
+        _start_agent_build(sid, session)
+        err = _wait_agent(session, rid, timeout=120.0)
+    except Exception:
+        logger.warning("auto-continue agent build failed for %s", sid, exc_info=True)
+        err = {"error": {"message": "agent build failed"}}
+    if err:  # leave the marker: the next resume retries (bounded by attempts)
+        session["_auto_continue_scheduled"] = False
+        dashboard_clarify_abandon_generic_recovery(session, "agent_build_failed")
+        return
+    with session["history_lock"]:
+        if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
+            session["_auto_continue_scheduled"] = False  # a real user prompt beat us
+            dashboard_clarify_abandon_generic_recovery(session, "session_busy")
+            return
+        session["running"] = True
+        session["last_active"] = time.time()
+    # Ownership admission BEFORE message.start: a sibling backend sharing this HERMES_HOME may have
+    # written the marker and still be mid-turn. Leave it so a later resume can retry.
+    if _ensure_active_session_slot(sid, session) is not None:
+        logger.info("auto-continue for %s refused: session has another live owner", session_key)
+        with session["history_lock"]:
+            session["running"] = False
+            session["_auto_continue_scheduled"] = False
+        dashboard_clarify_abandon_generic_recovery(session, "ownership_refused")
+        return
+    with session["history_lock"]:
+        # _record_turn_marker consumes these, preserving the original prompt and crash attempt.
+        session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
+    _dispatch_auto_continue(rid, sid, session, text)
+
+
+def _auto_continue_refusal_reason(
+    *, enabled: bool, age: float, freshness_secs: float, attempts: int, max_attempts: int,
+) -> str:
+    if not enabled:
+        return "disabled"
+    if age > freshness_secs:
+        return "stale"
+    return "attempts_exhausted" if attempts >= max_attempts else ""
+
+
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
     """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths). Returns a descriptor
     for the resume payload when scheduled, else None. The turn runs on a background thread after the deferred agent
@@ -70,60 +134,24 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         return None
     enabled, freshness_secs, max_attempts = _auto_continue_config()
     age = time.time() - marker["started_at"]
-    if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
+    refusal_reason = _auto_continue_refusal_reason(
+        enabled=enabled, age=age, freshness_secs=freshness_secs,
+        attempts=marker["attempts"], max_attempts=max_attempts,
+    )
+    if refusal_reason:
         clear_turn_marker(home, marker_key)  # stale/disabled/crash-looping: a manual message continues
-        dashboard_clarify_abandon_generic_recovery(
-            session,
-            "disabled" if not enabled else "stale" if age > freshness_secs else "attempts_exhausted",
-        )
+        dashboard_clarify_abandon_generic_recovery(session, refusal_reason)
         return None
     if session.get("_auto_continue_scheduled"):
         return None
     session["_auto_continue_scheduled"] = True
     attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
 
-    def kickoff() -> None:
-        rid = f"__auto_continue__{int(time.time() * 1000)}"
-        try:
-            _start_agent_build(sid, session)
-            err = _wait_agent(session, rid, timeout=120.0)
-        except Exception:
-            logger.warning("auto-continue agent build failed for %s", sid, exc_info=True)
-            err = {"error": {"message": "agent build failed"}}
-        if err:  # leave the marker: the next resume retries (bounded by attempts)
-            session["_auto_continue_scheduled"] = False
-            return
-        with session["history_lock"]:
-            if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
-                session["_auto_continue_scheduled"] = False  # a real user prompt beat us; it clears the marker
-                return
-            session["running"] = True
-            session["last_active"] = time.time()
-        # Ownership admission BEFORE message.start: a sibling backend sharing this HERMES_HOME may have written the
-        # marker and still be mid-turn. Leave the marker so a later resume retries.
-        # Running the continuation anyway would be the double-writer this fence exists to prevent. See
-        # #94778.
-        if _ensure_active_session_slot(sid, session) is not None:
-            logger.info("auto-continue for %s refused: session has another live owner", session_key)
-            with session["history_lock"]:
-                session["running"] = False
-                session["_auto_continue_scheduled"] = False
-            return
-        with session["history_lock"]:
-            # Marker inputs read back by _run_prompt_submit: attempt count (crash breaker) and the ORIGINAL prompt (no
-            # nested notes). Set here, not at schedule time, so a bail above leaves nothing for a racing user turn.
-            session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
-        try:
-            _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
-            _emit("message.start", sid)
-            handoff_kwargs = dashboard_clarify_generic_recovery_callbacks(session)
-            _run_prompt_submit(
-                rid, sid, session, text, display_kind="auto_continue", **handoff_kwargs,
-            )
-        except Exception as exc:
-            _notif_log_failure("auto-continue dispatch failed", exc)
-            _notif_release_turn(session)  # rebound from session_notifications
-    threading.Thread(target=kickoff, daemon=True).start()
+    threading.Thread(
+        target=_auto_continue_kickoff,
+        args=(sid, session, session_key, marker, attempt, text),
+        daemon=True,
+    ).start()
     logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago)", session_key, attempt, age)
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
 

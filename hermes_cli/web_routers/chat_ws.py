@@ -82,6 +82,11 @@ def _dashboard_computer_url() -> Optional[str]:
     raw = str(dashboard.get("computer_url") or "").strip() if isinstance(dashboard, dict) else ""
     if not raw or len(raw) > 2_048:
         return None
+    return _validated_dashboard_computer_url(raw)
+
+
+def _validated_dashboard_computer_url(raw: str) -> Optional[str]:
+    """Return a credential-free HTTPS console URL, excluding ambient request state."""
     try:
         parsed = urllib.parse.urlsplit(raw)
     except ValueError:
@@ -95,20 +100,28 @@ def _dashboard_computer_url() -> Optional[str]:
     return urllib.parse.urlunsplit(("https", parsed.netloc, parsed.path or "/", "", ""))
 
 
+def _trusted_session_id(binding: object, current_capability: str) -> str:
+    """Validate a channel's exact live gateway-WS capability binding."""
+    if not isinstance(binding, dict) or binding.get("source") != "gateway_ws":
+        return ""
+    sid = str(binding.get("session_id") or "")
+    stored_capability = str(binding.get("capability") or "")
+    if not all((sid, current_capability, stored_capability)):
+        return ""
+    if not hmac.compare_digest(current_capability.encode(), stored_capability.encode()):
+        return ""
+    return sid
+
+
 def _active_sid_for_channel(app: FastAPI, channel: str) -> str:
     if not _VALID_CHANNEL_RE.fullmatch(channel):
         raise HTTPException(status_code=400, detail="invalid chat channel")
     from hermes_cli.web_server import _get_pty_channel_bindings, _get_pty_channel_sessions
 
     binding = _get_pty_channel_sessions(app).get(channel)
-    sid = str(binding.get("session_id") or "") if isinstance(binding, dict) else ""
     current_capability = _get_pty_channel_bindings(app).get(channel, "")
-    stored_capability = str(binding.get("capability") or "") if isinstance(binding, dict) else ""
-    if not sid or binding.get("source") != "gateway_ws":
-        raise HTTPException(status_code=409, detail="chat session is not ready")
-    if not current_capability or not stored_capability:
-        raise HTTPException(status_code=409, detail="chat session is not ready")
-    if not hmac.compare_digest(current_capability.encode(), stored_capability.encode()):
+    sid = _trusted_session_id(binding, current_capability)
+    if not sid:
         raise HTTPException(status_code=409, detail="chat session is not ready")
     return sid
 
