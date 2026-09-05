@@ -13,7 +13,7 @@ import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, cast
 
 from hermes_constants import (
     get_hermes_home, get_skills_dir, is_wsl, reset_hermes_home_override, set_hermes_home_override,
@@ -28,6 +28,9 @@ from agent.skill_utils import (
 )
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
 from utils import atomic_json_write
+
+if TYPE_CHECKING:
+    from hermes_cli.projects_db import Project
 
 logger = logging.getLogger(__name__)
 
@@ -1593,7 +1596,7 @@ def _load_registered_project_context(
         ok, value = result.get(timeout=timeout)
         if not ok:
             raise value  # type: ignore[misc]
-        project = value
+        project = cast("Project | None", value)
     except queue.Empty:
         logger.warning(
             "Registered project lookup for %s timed out after %.1fs; skipping",
