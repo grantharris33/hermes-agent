@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from agent.system_prompt import build_system_prompt, build_system_prompt_parts
 
 
@@ -398,6 +400,11 @@ def test_coding_instructions_load_from_agent_profile_without_context_override(mo
     )
     monkeypatch.setenv("HERMES_HOME", str(launch_home))
     assert get_hermes_home_override() is None
+    before = {
+        path.relative_to(bot_home): path.read_bytes()
+        for path in bot_home.rglob("*")
+        if path.is_file()
+    }
 
     agent = _make_agent(
         valid_tool_names=["read_file"],
@@ -416,7 +423,30 @@ def test_coding_instructions_load_from_agent_profile_without_context_override(mo
     assert "Operator instructions (from config):\nBOT-ONLY" in prompt
     assert "LAUNCH-ONLY" not in prompt
     assert get_hermes_home_override() is None
-    assert not (bot_home / "config.yaml.lock").exists()
+    after = {
+        path.relative_to(bot_home): path.read_bytes()
+        for path in bot_home.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert {path.relative_to(bot_home) for path in bot_home.rglob("*")} == {Path("config.yaml")}
+
+
+def test_agent_config_read_failure_resets_profile_override(monkeypatch, tmp_path):
+    from agent.system_prompt import _agent_config_readonly
+    from hermes_constants import get_hermes_home_override
+
+    bot_home = tmp_path / "profiles" / "manager"
+    agent = _make_agent(_session_db=SimpleNamespace(db_path=bot_home / "state.db"))
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config_readonly_without_home_bootstrap",
+        lambda: (_ for _ in ()).throw(RuntimeError("read failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="read failed"):
+        _agent_config_readonly(agent)
+    assert get_hermes_home_override() is None
+    assert not bot_home.exists()
 
 
 class TestTelegramRichMessagesHint:

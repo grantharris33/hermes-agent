@@ -265,17 +265,17 @@ def _agent_config_readonly(agent: Any) -> Dict[str, Any]:
     temporary context-local override keeps this read isolated without mutating
     ``HERMES_HOME`` or creating/migrating config files.
     """
-    from hermes_cli.config import load_config_readonly
+    from hermes_cli.config import load_config_readonly_without_home_bootstrap
 
     home = _agent_home(agent)
     if home is None:
-        return load_config_readonly()
+        return load_config_readonly_without_home_bootstrap()
 
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
     token = set_hermes_home_override(home)
     try:
-        return load_config_readonly()
+        return load_config_readonly_without_home_bootstrap()
     finally:
         reset_hermes_home_override(token)
 

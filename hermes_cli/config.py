@@ -2039,6 +2039,17 @@ def load_config_readonly() -> Dict[str, Any]:
     return _load_config_impl(want_deepcopy=False)
 
 
+def load_config_readonly_without_home_bootstrap() -> Dict[str, Any]:
+    """Load merged config without creating or migrating the selected Hermes home.
+
+    This is for prompt assembly and other observational paths where even the
+    usual first-load directory bootstrap would violate the caller's read-only
+    contract.  The returned mapping has the same do-not-mutate contract as
+    :func:`load_config_readonly`.
+    """
+    return _load_config_impl(want_deepcopy=False, bootstrap_home=False)
+
+
 def _ensure_dict(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
     """Return ``parent[key]`` as a dict, replacing a missing or non-dict value with ``{}``."""
     child = parent.get(key)
@@ -2212,64 +2223,95 @@ def _merge_managed_overlay(expanded: Dict[str, Any]) -> Tuple[Dict[str, Any], An
     return _deep_merge(expanded, _expand_env_vars(managed_normalized)), managed_config
 
 
-def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
+def _cached_config_for_signature(
+    path_key: str, cache_sig: Optional[Tuple[int, int, int, int]], *, want_deepcopy: bool,
+) -> Optional[Dict[str, Any]]:
+    """Return a still-valid merged-config cache entry, if one exists."""
+    cached = _LOAD_CONFIG_CACHE.get(path_key)
+    if cached is None or cache_sig is None or cached[:4] != cache_sig:
+        return None
+    env_snapshot = cached[5] if len(cached) > 5 else {}
+    if not all(_env_ref_lookup(key) == value for key, value in env_snapshot.items()):
+        return None
+    return copy.deepcopy(cached[4]) if want_deepcopy else cached[4]
+
+
+def _merge_user_config(config_path: Path, base: Dict[str, Any]) -> Dict[str, Any]:
+    """Read and merge the user file, including its legacy max-turns alias."""
+    with open(config_path, encoding="utf-8") as config_file:
+        user_config = fast_safe_load(config_file) or {}
+    if "max_turns" in user_config:
+        agent_user_config = dict(user_config.get("agent") or {})
+        if agent_user_config.get("max_turns") is None:
+            agent_user_config["max_turns"] = user_config["max_turns"]
+        user_config["agent"] = agent_user_config
+        user_config.pop("max_turns", None)
+    return _deep_merge(base, user_config)
+
+
+def _config_with_user_overrides(
+    config_path: Path,
+    path_key: str,
+    user_sig: Optional[Tuple[int, int]],
+    cache_sig: Optional[Tuple[int, int, int, int]],
+    *,
+    want_deepcopy: bool,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Return ``(config, terminal_fallback)`` after reading user overrides."""
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    if user_sig is None:
+        return config, None
+    try:
+        return _merge_user_config(config_path, config), None
+    except Exception as exc:
+        fallback = _last_known_good_fallback(config_path, path_key, cache_sig, exc)
+        if fallback is None:
+            return config, None
+        return config, copy.deepcopy(fallback) if want_deepcopy else fallback
+
+
+def _store_expanded_config(
+    path_key: str,
+    cache_sig: Optional[Tuple[int, int, int, int]],
+    normalized: Dict[str, Any],
+    expanded: Dict[str, Any],
+    managed_config: Any,
+    *,
+    want_deepcopy: bool,
+) -> Dict[str, Any]:
+    """Update last-good/cache state and return the correctly aliased result."""
+    _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
+    if cache_sig is None:
+        _LOAD_CONFIG_CACHE.pop(path_key, None)
+        return expanded
+    cached_copy = copy.deepcopy(expanded)
+    env_snapshot = _env_ref_snapshot(normalized)
+    if managed_config:
+        _env_ref_snapshot(managed_config, env_snapshot)
+    _LOAD_CONFIG_CACHE[path_key] = (*cache_sig, cached_copy, env_snapshot)
+    return cached_copy if not want_deepcopy else expanded
+
+
+def _load_config_impl(*, want_deepcopy: bool, bootstrap_home: bool = True) -> Dict[str, Any]:
     with _CONFIG_LOCK:
-        ensure_hermes_home()
+        if bootstrap_home:
+            ensure_hermes_home()
         config_path = get_config_path()
         path_key = str(config_path)
-
         user_sig, cache_sig = _load_config_cache_sig(config_path)
-
-        cached = _LOAD_CONFIG_CACHE.get(path_key)
-        if cached is not None and cache_sig is not None and cached[:4] == cache_sig:
-            # Signatures match, but the cached expansion is only valid if every ${VAR} it was
-            # expanded against still has the same value — otherwise a load before
-            # load_hermes_dotenv() pins unexpanded literals for the process lifetime.
-            # Without this, a load_config() that ran before load_hermes_dotenv() pins unexpanded literals
-            # (e.g. auxiliary.<task>.api_key) for the life of the process (#58514).
-            env_snapshot = cached[5] if len(cached) > 5 else {}
-            if all(_env_ref_lookup(k) == v for k, v in env_snapshot.items()):
-                return copy.deepcopy(cached[4]) if want_deepcopy else cached[4]
-
-        config = copy.deepcopy(DEFAULT_CONFIG)
-
-        if user_sig is not None:
-            try:
-                with open(config_path, encoding="utf-8") as f:
-                    user_config = fast_safe_load(f) or {}
-
-                if "max_turns" in user_config:
-                    agent_user_config = dict(user_config.get("agent") or {})
-                    if agent_user_config.get("max_turns") is None:
-                        agent_user_config["max_turns"] = user_config["max_turns"]
-                    user_config["agent"] = agent_user_config
-                    user_config.pop("max_turns", None)
-
-                config = _deep_merge(config, user_config)
-            except Exception as e:
-                lkg_copy = _last_known_good_fallback(config_path, path_key, cache_sig, e)
-                if lkg_copy is not None:
-                    return copy.deepcopy(lkg_copy) if want_deepcopy else lkg_copy
-
+        cached = _cached_config_for_signature(path_key, cache_sig, want_deepcopy=want_deepcopy)
+        if cached is not None:
+            return cached
+        config, fallback = _config_with_user_overrides(
+            config_path, path_key, user_sig, cache_sig, want_deepcopy=want_deepcopy,
+        )
+        if fallback is not None:
+            return fallback
         normalized = _canonicalize_config(config)
         expanded, managed_config = _merge_managed_overlay(_expand_env_vars(normalized))
-        _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
-        if cache_sig is not None:
-            # The cache stores its own deepcopy so load_config() callers can mutate freely while
-            # load_config_readonly() callers all see the same stable object. The env snapshot
-            # records the values this expansion was made against so later loads detect drift.
-            cached_copy = copy.deepcopy(expanded)
-            env_snapshot = _env_ref_snapshot(normalized)
-            if managed_config:
-                _env_ref_snapshot(managed_config, env_snapshot)
-            _LOAD_CONFIG_CACHE[path_key] = (*cache_sig, cached_copy, env_snapshot)
-            # Readonly path returns the same object later calls will see (identity invariant).
-            if not want_deepcopy:
-                return cached_copy
-        else:
-            _LOAD_CONFIG_CACHE.pop(path_key, None)
-        # First-load result is a fresh dict (not aliased to the cache); safe to return directly.
-        return expanded
+        return _store_expanded_config(
+            path_key, cache_sig, normalized, expanded, managed_config, want_deepcopy=want_deepcopy,
+        )
 
 
 _SECURITY_COMMENT = """
