@@ -256,6 +256,30 @@ def _agent_skills_dir(agent: Any) -> Optional[Path]:
     return home / "skills" if home is not None else None
 
 
+def _agent_config_readonly(agent: Any) -> Dict[str, Any]:
+    """Load config from the agent's own profile without changing process state.
+
+    Gateway turns normally bind the profile home through a ContextVar, but
+    prompt rebuilds can also run on threads where that binding is absent.  In
+    that case the session DB remains the profile-owned source of truth.  A
+    temporary context-local override keeps this read isolated without mutating
+    ``HERMES_HOME`` or creating/migrating config files.
+    """
+    from hermes_cli.config import load_config_readonly
+
+    home = _agent_home(agent)
+    if home is None:
+        return load_config_readonly()
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(home)
+    try:
+        return load_config_readonly()
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _profile_name_for_home(home: Path) -> str:
     """``<root>/profiles/X`` -> ``"X"``; anything else -> ``"default"``.
     Uses ``get_default_hermes_root()`` (NOT ``get_hermes_home()``): on a bound
@@ -543,7 +567,8 @@ def _coding_parts(agent: Any) -> Tuple[List[str], List[str], List[str]]:
         from agent.coding_context import coding_system_prompt_parts
         if agent.valid_tool_names:
             return coding_system_prompt_parts(platform=agent.platform, cwd=resolve_context_cwd(),
-                                              model=agent.model, valid_tool_names=agent.valid_tool_names)
+                                              config=_agent_config_readonly(agent), model=agent.model,
+                                              valid_tool_names=agent.valid_tool_names)
     except Exception:
         pass
     return [], [], []

@@ -380,6 +380,45 @@ def test_coding_prompt_preserves_legacy_workspace_order(monkeypatch):
     assert agent._cached_system_prompt_static == "\n\n".join(expected.split("\n\n")[:4])
 
 
+def test_coding_instructions_load_from_agent_profile_without_context_override(monkeypatch, tmp_path):
+    """A prompt rebuild on an unbound worker must not inherit launch-profile rules."""
+    from hermes_constants import get_hermes_home_override
+
+    launch_home = tmp_path / "launch"
+    bot_home = tmp_path / "profiles" / "manager"
+    launch_home.mkdir(parents=True)
+    bot_home.mkdir(parents=True)
+    (launch_home / "config.yaml").write_text(
+        "agent:\n  coding_context: on\n  coding_instructions: LAUNCH-ONLY\n",
+        encoding="utf-8",
+    )
+    (bot_home / "config.yaml").write_text(
+        "agent:\n  coding_context: on\n  coding_instructions: BOT-ONLY\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(launch_home))
+    assert get_hermes_home_override() is None
+
+    agent = _make_agent(
+        valid_tool_names=["read_file"],
+        _session_db=SimpleNamespace(db_path=bot_home / "state.db"),
+        _parallel_tool_call_guidance=False,
+    )
+    with (
+        patch("agent.prompt_builder.load_soul_md", return_value=""),
+        patch("agent.prompt_builder.build_environment_hints", return_value=""),
+        patch("agent.prompt_builder.build_context_files_prompt", return_value=""),
+        patch("agent.file_safety._resolve_active_profile_name", return_value="manager"),
+        patch("hermes_time.now", return_value=datetime(2026, 1, 2)),
+    ):
+        prompt = build_system_prompt(agent, system_message="SYSTEM_MESSAGE")
+
+    assert "Operator instructions (from config):\nBOT-ONLY" in prompt
+    assert "LAUNCH-ONLY" not in prompt
+    assert get_hermes_home_override() is None
+    assert not (bot_home / "config.yaml.lock").exists()
+
+
 class TestTelegramRichMessagesHint:
     """Verify that TELEGRAM_RICH_MESSAGES_HINT is conditionally included."""
 
@@ -762,4 +801,3 @@ class TestConversationStartedTwoLine:
         vol = self._volatile(agent)
         assert "Conversation started:" not in vol
         assert "as of the last context rebuild" not in vol
-
