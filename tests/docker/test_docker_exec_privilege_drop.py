@@ -182,40 +182,33 @@ def test_docker_exec_inherits_discovered_browser_path(
     """The shim bridges s6's runtime browser path into ad-hoc CLI sessions.
 
     Docker exec starts with the image's static environment, while stage2 finds
-    Chromium only at container boot and writes its path to s6's envdir.  A
-    long-lived dashboard command gives the test enough time to inspect the
-    real post-shim Hermes process environment without adding a diagnostic-only
-    product command.
+    Chromium only at container boot and writes its path to s6's envdir.  The
+    fixture replaces the real console entry point *inside this disposable
+    container* with a tiny environment probe, then invokes the production shim
+    normally.  This avoids relying on cross-UID ``/proc`` inspection, which is
+    deliberately denied by the production container's capability set.
     """
-    port = "19129"
     r = subprocess.run(
-        ["docker", "exec", "-d", sleep_container,
-         "hermes", "dashboard", "--host", "127.0.0.1", "--port", port,
-         "--no-open"],
-        capture_output=True, text=True, timeout=15,
+        ["docker", "exec", "--user", "root", sleep_container, "sh", "-c",
+         "mv /opt/hermes/.venv/bin/hermes /tmp/hermes-real && "
+         "printf '%s\\n' '#!/bin/sh' "
+         "'printf \"%s\\n\" \"${AGENT_BROWSER_EXECUTABLE_PATH:-}\"' "
+         "> /opt/hermes/.venv/bin/hermes && "
+         "chmod 0755 /opt/hermes/.venv/bin/hermes"],
+        capture_output=True, text=True, timeout=10,
     )
-    assert r.returncode == 0, f"dashboard launch failed: {r.stderr}"
+    assert r.returncode == 0, f"environment probe setup failed: {r.stderr}"
 
-    deadline = time.monotonic() + 15
-    observed = ""
-    while time.monotonic() < deadline:
-        r = subprocess.run(
-            ["docker", "exec", sleep_container, "sh", "-c",
-             f"pid=$(pgrep -f 'hermes dashboard.*--port {port}' | head -n 1); "
-             "[ -n \"$pid\" ] && tr '\\0' '\\n' < /proc/$pid/environ | "
-             "grep '^AGENT_BROWSER_EXECUTABLE_PATH='"],
-            capture_output=True, text=True, timeout=5,
-        )
-        observed = r.stdout.strip()
-        if r.returncode == 0 and observed:
-            break
-        time.sleep(0.2)
-
-    assert observed.startswith("AGENT_BROWSER_EXECUTABLE_PATH=/"), (
+    r = subprocess.run(
+        ["docker", "exec", sleep_container, "hermes"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert r.returncode == 0, f"shim environment probe failed: {r.stderr}"
+    browser_path = r.stdout.strip()
+    assert browser_path.startswith("/"), (
         "docker-exec Hermes process did not inherit the s6-discovered "
-        f"browser path (observed={observed!r})"
+        f"browser path (observed={browser_path!r})"
     )
-    browser_path = observed.split("=", 1)[1]
     r = subprocess.run(
         ["docker", "exec", sleep_container, "test", "-x", browser_path],
         capture_output=True, text=True, timeout=5,
