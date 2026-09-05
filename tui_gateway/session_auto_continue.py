@@ -55,7 +55,7 @@ def _auto_continue_note(prompt: str) -> str:
 
 
 def _dispatch_auto_continue(rid: str, sid: str, session: dict, text: str) -> None:
-    """Dispatch one admitted recovery and make any handoff-specific refusal actionable."""
+    """Dispatch one admitted recovery without changing shared state on uncertain ownership."""
     try:
         _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
         _emit("message.start", sid)
@@ -64,10 +64,10 @@ def _dispatch_auto_continue(rid: str, sid: str, session: dict, text: str) -> Non
             rid, sid, session, text, display_kind="auto_continue", **handoff_kwargs,
         )
         if handoff_kwargs and not started:
-            dashboard_clarify_abandon_generic_recovery(session, "dispatch_refused")
+            session["_auto_continue_scheduled"] = False
     except Exception as exc:
         _notif_log_failure("auto-continue dispatch failed", exc)
-        dashboard_clarify_abandon_generic_recovery(session, "dispatch_failed")
+        session["_auto_continue_scheduled"] = False
         _notif_release_turn(session)  # rebound from session_notifications
 
 
@@ -89,7 +89,6 @@ def _auto_continue_kickoff(
     with session["history_lock"]:
         if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
             session["_auto_continue_scheduled"] = False  # a real user prompt beat us
-            dashboard_clarify_abandon_generic_recovery(session, "session_busy")
             return
         session["running"] = True
         session["last_active"] = time.time()
@@ -100,7 +99,6 @@ def _auto_continue_kickoff(
         with session["history_lock"]:
             session["running"] = False
             session["_auto_continue_scheduled"] = False
-        dashboard_clarify_abandon_generic_recovery(session, "ownership_refused")
         return
     with session["history_lock"]:
         # _record_turn_marker consumes these, preserving the original prompt and crash attempt.

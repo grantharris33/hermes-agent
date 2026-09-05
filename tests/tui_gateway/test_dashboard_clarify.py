@@ -228,7 +228,7 @@ def test_admitted_generic_recovery_build_failure_reexposes_exact_card(handoff, m
     assert server.dashboard_clarify_pending_for_sid(sid)["retry_message"]
 
 
-def test_admitted_generic_recovery_dispatch_refusal_reexposes_exact_card(handoff, monkeypatch):
+def test_admitted_generic_recovery_dispatch_refusal_preserves_ownership(handoff, monkeypatch):
     server, _db, sid = handoff
     _record(server, sid)
     session = server._sessions[sid]
@@ -244,11 +244,55 @@ def test_admitted_generic_recovery_dispatch_refusal_reexposes_exact_card(handoff
     server._dispatch_auto_continue("auto-rid", sid, session, "resume safely")
 
     marker = server._dashboard_clarify_read(session)
-    assert marker["status"] == "pending"
+    assert marker["status"] == "admitted"
     assert marker["request_id"] == "clarify-1"
-    assert marker["recovery_lost_reason"] == "dispatch_refused"
-    assert marker["turn_marker_key"] == "recovery-marker"
-    assert server.dashboard_clarify_pending_for_sid(sid)["retry_message"]
+    assert session["_auto_continue_scheduled"] is False
+    assert server.dashboard_clarify_pending_for_sid(sid) is None
+
+
+def test_concurrent_owner_refusal_keeps_shared_marker_admitted(handoff, monkeypatch):
+    server, _db, sid = handoff
+    _record(server, sid)
+    session = server._sessions[sid]
+    session["running"] = False
+    assert server._dashboard_clarify_set_status(
+        session, "clarify-1", "admitted", answer="Continue",
+        recovery_turn_marker_key="recovery-marker",
+        recovery_turn_generation="recovery-generation",
+    )
+
+    class InlineThread:
+        def __init__(self, target=None, args=(), **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(server.threading, "Thread", InlineThread)
+    monkeypatch.setattr(
+        server,
+        "read_turn_marker",
+        lambda _home, key: (
+            {"prompt": "recovered prompt", "started_at": time.time(), "attempts": 0}
+            if key == "recovery-marker" else None
+        ),
+    )
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        server, "_ensure_active_session_slot",
+        lambda *_args, **_kwargs: type("Refusal", (), {"reason": "SESSION_NOT_OWNED"})(),
+    )
+
+    result = server._maybe_schedule_auto_continue(sid, session, "rotated-owner")
+
+    assert result["attempt"] == 1
+    marker = server._dashboard_clarify_read(session)
+    assert marker["status"] == "admitted"
+    assert marker["request_id"] == "clarify-1"
+    assert server.dashboard_clarify_pending_for_sid(sid) is None
 
 
 def test_admitted_recovery_defers_to_generic_crash_marker(handoff, monkeypatch):
